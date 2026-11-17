@@ -1169,3 +1169,79 @@ The two concepts must never share recruitment logic.
 - `confirmed_count` is **not stored**. It is the number of `MatchParticipant` rows with status CONFIRMED; `availableSpots = capacity - confirmedCount` is derived too.
 - Capacity can never be exceeded: approvals lock the match row, count, then insert, and a database trigger repeats the check, so application bugs cannot overfill a match.
 - OPEN/FULL status is kept in sync by the database whenever confirmations or capacity change.
+
+## D18. Account Deletion (2026-11-17) — "block until clean, then anonymize"
+Decided by the product owner after the production-readiness audit (finding PRIV-01). Final wording.
+
+**Rule.** A user may delete their account only when they hold no unresolved responsibilities. If they do, the request is **refused with HTTP 409** and a clear, machine-readable list of every reason (code, count, and the affected resource ids). A refused request changes nothing.
+
+**Blockers (each must be resolved by the user first):**
+1. **Organizing upcoming matches** — cancel each match or transfer organizer responsibility to someone else.
+2. **Captaining a team that has other members** — transfer the captaincy to another member first.
+3. **Owning venues** — transfer ownership first. If a transfer is not possible, the venue must be deactivated and its future bookings resolved (pending requests rejected, confirmed bookings cancelled with notification) before deletion.
+4. **Being a member of a team** — an ordinary team member must **leave the team themselves** before deleting the account. They are never removed automatically, with or without a notification.
+
+**When no blocker remains:** erase or anonymize the user's personal data while **preserving historical records and referential integrity**. Every historical reference to the user is displayed as **"Deleted user"**.
+
+**Historical content is preserved.** Chat messages and reviews the user wrote are **kept**. Only the author's identity is anonymized (shown as "Deleted user"); their content is not erased automatically.
+
+**Never:** automatically cancel other users' matches, and never remove the user from a team automatically or silently.
+
+**Out of scope for the MVP:** **data export** (a user downloading their data). It is a future feature.
+
+*Implications recorded for implementation (not yet built):*
+- A user row cannot be hard-deleted (21 foreign keys restrict it), so the account is **anonymized in place**: status DELETED, a unique unusable e-mail placeholder, name "Deleted user", avatar removed, credentials and sessions revoked. Rows that hold personal data and are not part of shared history (player profile, device tokens, e-mail tokens, notifications, blocks) are erased. Messages and reviews stay.
+- The sentence "preserve their content" means free text they wrote can still contain personal details; this is accepted by the decision above.
+- API user summaries should expose a `deleted` flag so clients can localize "Deleted user" (Arabic / English).
+- The deletion blocker check needs, at minimum: upcoming matches organized, teams captained with other members, venues owned, and team memberships.
+- "Transfer organizer responsibility" and "transfer venue ownership" do not exist in the system yet. See the open points: whether organizer transfer is built is undecided (D19.4); venue ownership transfer is required by blocker 3 unless the deactivation path is used.
+
+*Open points (not decided; no rule has been assumed):*
+(a) What counts as "upcoming" for blocker 1 (proposal, not adopted: OPEN, FULL, SCHEDULED, IN_PROGRESS, and CLOSED_UNCONFIRMED while the organizer can still recover it).
+(b) The user's own upcoming participations, pending join requests and their own future bookings: blocker, automatic clean-up, or left as they are?
+(c) A team whose only member is the deleting captain (blocker 2 applies only when there are other members; the team's fate is not specified).
+(d) Staff roles the user holds at other people's venues, and pending invitations: not covered.
+(e) Venue ownership transfer: who may receive it, whether the recipient must accept, and who may manage or reactivate a venue that ends up deactivated and owned by a deleted user.
+(f) Other free text the user wrote besides messages and reviews (match notes and descriptions, booking notes, reports): kept or erased?
+(g) Re-registration with the same e-mail after deletion (technical default would be: allowed, because the placeholder frees the address).
+
+## D19. Team Challenge Control (2026-11-17)
+Decided by the product owner after the production-readiness audit (finding BIZ-02). Final wording. Refines D7 and D14; **D1–D17 are preserved**.
+
+1. **Organizer.** The captain of the challenging team **at the moment the challenge is created** becomes the match organizer.
+2. **Later captaincy changes.** A later change of captain does **not** change the match organizer.
+3. **Changing the organizer.** Organizer responsibility changes **only through an explicit transfer action, if such an action is supported**.
+4. **Rosters.** After the challenge is accepted, **each team's captain selects and manages that team's roster. Vice captains keep their existing permission to manage their own team's roster.** Neither a captain nor a vice captain can modify the opposing team's roster.
+5. **Lifecycle.** The match organizer controls the administrative lifecycle: **cancellation, rescheduling (subject to the existing rescheduling rules, D12) and confirming completion.**
+6. **Unchanged:** one Match with HOME/AWAY sides, starts SCHEDULED, no capacity, no join requests, rosters chosen from the team's members (D7, D14, D15); CLOSED_UNCONFIRMED and review rules (D16) apply.
+
+**Consequences.** The opposing captain has no right to cancel, reschedule or complete the match; they manage only their own roster. A minimum roster at kick-off is **not** required (no automatic cancellation). An organizer of an upcoming team match cannot delete their account until the match is cancelled or the organizer role is transferred (D18).
+
+*Implications recorded for implementation (not yet built):*
+- Today the organizer is the challenging team's captain **at acceptance**; the decision requires the captain **at creation**, so the organizer must be remembered when the challenge is created (this will need a schema change).
+- Today a later captaincy transfer does not change the organizer, which already matches decision 2.
+- Today vice captains can manage rosters, which already matches decision 4.
+- Rescheduling a team match is not supported by the code today (only open matches can be edited). The database already allows it under D12 (only while nobody is confirmed), so it would in practice apply only before rosters are filled; both teams should be told.
+
+*Open points (not decided; no rule has been assumed):*
+(a) If the captain who created the challenge is no longer on the challenging team (or is suspended or deleted) when the challenge is accepted, who becomes the organizer?
+(b) Whether an explicit organizer transfer is built at all ("if supported"), and if so who may receive it and whether they must accept. Without it, D18 blocker 1 can only be resolved by cancelling the match.
+
+## D20. Technical Configuration Decisions (2026-11-17)
+Decided by the product owner after the production-readiness audit.
+
+- **E-mail links (verification, password reset):** Expo-compatible **deep links**. The targets stay configurable through environment variables (`VERIFY_EMAIL_URL`, `RESET_PASSWORD_URL`, templates containing `{token}`).
+- **Push notifications:** **Expo Push Notifications**.
+- **Error tracking:** **Sentry**.
+- **Data export:** out of MVP scope (see D18).
+
+*Implications recorded for implementation (not yet built):*
+- Deep links need the mobile app's URL scheme to be defined in the Expo app configuration. Development builds in Expo Go use a different URL form than release builds.
+- Notifications are stored as data (type + params), not text. Push messages need their text produced in the user's language (Arabic / English) when sent.
+- Device registration currently accepts any token string; with Expo, tokens have a known form and can be validated and cleaned up when Expo reports them invalid.
+- Sentry and Expo Push add network egress and (for Sentry) a new dependency; personal data (e-mail addresses, tokens, passwords, coordinates) must be kept out of error reports.
+
+*Open points (technical, not business rules):*
+(a) The app's URL scheme value, and whether an https fallback (for example a redirect page) is wanted, because many e-mail clients do not make custom-scheme links clickable.
+(b) The Sentry project and environment names, and the sampling rate.
+(c) Expo project id and access-token handling, and which notification types trigger a push.
