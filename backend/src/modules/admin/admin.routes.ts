@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { authenticate, requireAdmin } from '../../middleware/authenticate';
 import { validate } from '../../middleware/validate';
 import * as admin from './admin.controller';
-import { idParams, listUsersSchema, listVenuesSchema, reasonSchema } from './admin.schemas';
+import { idParams, listAuditLogSchema, listUsersSchema, listVenuesSchema, reasonSchema } from './admin.schemas';
 
 // Everything under /api/v1/admin needs an authenticated administrator.
 export const adminRouter = Router();
@@ -20,3 +20,6 @@ adminRouter.post('/venues/:id/suspend', validate({ params: idParams, body: reaso
 adminRouter.post('/venues/:id/reactivate', validate({ params: idParams, body: reasonSchema, optionalBody: true }), admin.reactivateVenue);
 
 adminRouter.get('/stats', admin.stats);
+
+// audit log: read only (no update or delete endpoint exists, by design)
+adminRouter.get('/audit-log', validate({ query: listAuditLogSchema }), admin.listAuditLog);

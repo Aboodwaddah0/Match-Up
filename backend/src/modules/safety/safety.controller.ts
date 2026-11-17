@@ -33,5 +33,5 @@ export const adminListReports = async (req: Request, res: Response) => {
 };
 
 export const adminUpdateReport = async (req: Request, res: Response) => {
-  res.json(await safety.updateReportStatus(req.auth!.userId, valid(req, 'params', reportIdParams).id, valid(req, 'body', updateReportSchema).status));
+  res.json(await safety.updateReportStatus(req.auth!.userId, valid(req, 'params', reportIdParams).id, valid(req, 'body', updateReportSchema).status, String(req.id)));
 };

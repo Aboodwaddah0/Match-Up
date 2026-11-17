@@ -28,7 +28,12 @@ export async function startApp() {
 
 export async function resetDb(): Promise<void> {
   const { prisma } = await import('../../src/lib/prisma');
-  await prisma.$executeRawUnsafe('TRUNCATE "user", city CASCADE');
+  // admin_audit_log refuses TRUNCATE (AUD-01); a test reset must empty everything, so the guard is off for this one transaction only.
+  await prisma.$transaction([
+    prisma.$executeRawUnsafe('ALTER TABLE admin_audit_log DISABLE TRIGGER trg_admin_audit_no_truncate'),
+    prisma.$executeRawUnsafe('TRUNCATE "user", city CASCADE'),
+    prisma.$executeRawUnsafe('ALTER TABLE admin_audit_log ENABLE TRIGGER trg_admin_audit_no_truncate'),
+  ]);
 }
 
 /** Pulls the `token=` value out of the last e-mail sent to `to`. */

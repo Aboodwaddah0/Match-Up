@@ -1,10 +1,11 @@
 import type { z } from 'zod';
+import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { disconnectUser } from '../../lib/realtime';
 import { notify } from '../notifications/notify';
 import { statsFor } from '../players/players.service';
-import type { listUsersSchema, listVenuesSchema } from './admin.schemas';
+import type { listAuditLogSchema, listUsersSchema, listVenuesSchema } from './admin.schemas';
 
 /*
  * Minimal platform administration: find users, suspend / reactivate them, take a venue off the platform
@@ -45,9 +46,10 @@ export async function getUser(id: string) {
 /**
  * Suspends an account (idempotent). Effective immediately: `authenticate` re-reads the account on every request,
  * so the access token stops working, and every refresh token is revoked so the user cannot silently get a new one.
- * Admins cannot suspend themselves or each other.
+ * Admins cannot suspend themselves or each other. An audit record is written (same transaction) only when the status
+ * really changes, so repeating the call does not fill the log with no-ops.
  */
-export async function suspendUser(adminId: string, id: string): Promise<void> {
+export async function suspendUser(adminId: string, id: string, reason: string | null | undefined, requestId?: string): Promise<void> {
   if (id === adminId) throw new AppError(400, 'INVALID_TARGET', 'You cannot suspend yourself');
   await prisma.$transaction(async (tx) => {
     const u = await tx.user.findUnique({ where: { id }, select: { status: true, platformRole: true } });
@@ -55,15 +57,21 @@ export async function suspendUser(adminId: string, id: string): Promise<void> {
     if (u.platformRole === 'ADMIN') throw new AppError(403, 'FORBIDDEN', 'Administrators cannot be suspended here');
     if (u.status === 'DELETED') throw new AppError(409, 'INVALID_STATE', 'This account is deleted');
     await tx.user.update({ where: { id }, data: { status: 'SUSPENDED' } });
+    if (u.status !== 'SUSPENDED') {
+      await recordAdminAudit(tx, { actorId: adminId, action: 'USER_SUSPENDED', targetType: 'USER', targetId: id, reason, metadata: { fromStatus: u.status, toStatus: 'SUSPENDED' }, requestId });
+    }
     await tx.refreshToken.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
   });
   disconnectUser(id); // a suspended user must stop receiving live chat immediately, not at the next reconnect
 }
 
 /** Lifts a suspension. Only a SUSPENDED account can be reactivated (409 otherwise). */
-export async function reactivateUser(id: string): Promise<void> {
-  const r = await prisma.user.updateMany({ where: { id, status: 'SUSPENDED' }, data: { status: 'ACTIVE' } });
-  if (r.count === 0) throw new AppError(409, 'INVALID_STATE', 'Only a suspended account can be reactivated');
+export async function reactivateUser(adminId: string, id: string, requestId?: string): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const r = await tx.user.updateMany({ where: { id, status: 'SUSPENDED' }, data: { status: 'ACTIVE' } });
+    if (r.count === 0) throw new AppError(409, 'INVALID_STATE', 'Only a suspended account can be reactivated');
+    await recordAdminAudit(tx, { actorId: adminId, action: 'USER_REACTIVATED', targetType: 'USER', targetId: id, metadata: { fromStatus: 'SUSPENDED', toStatus: 'ACTIVE' }, requestId });
+  });
 }
 
 // ───────────────────────── venues ─────────────────────────
@@ -85,11 +93,11 @@ export async function listVenues(q: z.infer<typeof listVenuesSchema>) {
 }
 
 /**
- * Moves a venue between ACTIVE and SUSPENDED and tells its owner.
+ * Moves a venue between ACTIVE and SUSPENDED, records it in the audit log and tells its owner (all in one transaction).
  * A suspended venue is hidden from search and takes no new bookings; existing bookings are NOT touched.
  * The status change is a conditional update (`status = from`), so the transition is atomic and a repeat gets a 409.
  */
-export async function setVenueStatus(id: string, to: 'ACTIVE' | 'SUSPENDED', reason: string | null | undefined): Promise<void> {
+export async function setVenueStatus(adminId: string, id: string, to: 'ACTIVE' | 'SUSPENDED', reason: string | null | undefined, requestId?: string): Promise<void> {
   const from = to === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED';
   await prisma.$transaction(async (tx) => {
     const r = await tx.venue.updateMany({ where: { id, status: from }, data: { status: to } });
@@ -97,9 +105,37 @@ export async function setVenueStatus(id: string, to: 'ACTIVE' | 'SUSPENDED', rea
       if (!(await tx.venue.findUnique({ where: { id }, select: { id: true } }))) throw new AppError(404, 'VENUE_NOT_FOUND', 'Venue not found');
       throw new AppError(409, 'INVALID_STATE', `Only an ${from.toLowerCase()} venue can be set to ${to.toLowerCase()}`);
     }
+    await recordAdminAudit(tx, { actorId: adminId, action: to === 'SUSPENDED' ? 'VENUE_SUSPENDED' : 'VENUE_REACTIVATED', targetType: 'VENUE', targetId: id, reason, metadata: { fromStatus: from, toStatus: to }, requestId });
     const v = await tx.venue.findUniqueOrThrow({ where: { id }, select: { ownerId: true, name: true } });
     await notify(tx, [v.ownerId], to === 'SUSPENDED' ? 'VENUE_SUSPENDED' : 'VENUE_REACTIVATED', { venueId: id, name: v.name, reason: reason ?? null }, { type: 'venue', id });
   });
+}
+
+// ───────────────────────── audit log (read only) ─────────────────────────
+
+/**
+ * Reads the audit log, newest first. Read only: there is deliberately no way to change or delete a record. Only the stored
+ * audit fields are returned (ids, not names or e-mails; look a user up with GET /admin/users/:id).
+ */
+export async function listAuditLog(q: z.infer<typeof listAuditLogSchema>) {
+  const where = {
+    ...(q.actorId ? { actorId: q.actorId } : {}),
+    ...(q.action ? { action: q.action } : {}),
+    ...(q.targetType ? { targetType: q.targetType } : {}),
+    ...(q.targetId ? { targetId: q.targetId } : {}),
+    ...(q.from || q.to ? { createdAt: { ...(q.from ? { gte: new Date(q.from) } : {}), ...(q.to ? { lt: new Date(q.to) } : {}) } } : {}),
+  };
+  const [entries, total] = await Promise.all([
+    prisma.adminAuditLog.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: (q.page - 1) * q.pageSize,
+      take: q.pageSize,
+      select: { id: true, actorId: true, action: true, targetType: true, targetId: true, reason: true, metadata: true, requestId: true, createdAt: true },
+    }),
+    prisma.adminAuditLog.count({ where }),
+  ]);
+  return { entries, page: q.page, pageSize: q.pageSize, total };
 }
 
 // ───────────────────────── counters ─────────────────────────

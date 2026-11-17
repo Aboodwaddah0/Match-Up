@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
 import { withDeadlockRetry } from '../../lib/db-errors';
 import { AppError } from '../../lib/errors';
+import { recordAdminAudit } from '../../lib/audit';
 import { lockMatch } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
@@ -189,6 +190,56 @@ async function markAdminActor(tx: Prisma.TransactionClient, actor: Actor): Promi
   if (actor.role === 'ADMIN') await tx.$queryRaw`SELECT set_config('fym.actor_is_admin', 'true', true)`;
 }
 
+/**
+ * An admin acting on a match they do NOT organize (AUD-01: cancel, complete / recover and edit are recorded). An admin managing their own match is an ordinary organizer action and
+ * is not logged as an override.
+ */
+function isAdminOverride(actor: Actor, organizerId: string): boolean {
+  return actor.role === 'ADMIN' && actor.userId !== organizerId;
+}
+
+/**
+ * What an admin edit changed, for the audit log (AUD-01). Free text (title, description, notes, place name), coordinates, the
+ * linked booking and the required positions are reported by NAME only, never by value: they can hold personal or location data
+ * and the log can never be edited. Scalar fields that carry no personal data are reported as before / after.
+ */
+function describeMatchEdit(m: MatchRow, input: z.infer<typeof updateMatchSchema>, startAt: Date, endAt: Date, timeChanged: boolean) {
+  const changedFields: string[] = [];
+  const before: Record<string, string | number | null> = {};
+  const after: Record<string, string | number | null> = {};
+  const named = (field: string, provided: unknown, current: unknown) => {
+    if (provided !== undefined && provided !== current) changedFields.push(field);
+  };
+  named('title', input.title, m.title);
+  named('description', input.description, m.description);
+  named('notes', input.notes, m.notes);
+  named('locationName', input.locationName, m.locationName);
+  named('booking', input.bookingId, m.bookingId);
+  if ((input.latitude !== undefined && input.latitude !== m.latitude) || (input.longitude !== undefined && input.longitude !== m.longitude)) changedFields.push('location');
+  if (input.requiredPositions) {
+    const key = (list: { position: string; count: number }[]) => JSON.stringify([...list].sort((a, b) => a.position.localeCompare(b.position)).map((p) => [p.position, p.count]));
+    if (key(input.requiredPositions) !== key(m.requiredPositions)) changedFields.push('requiredPositions');
+  }
+  const valued = (field: string, provided: string | number | null | undefined, current: string | number | null) => {
+    if (provided === undefined || provided === current) return;
+    changedFields.push(field);
+    before[field] = current;
+    after[field] = provided;
+  };
+  valued('capacity', input.capacity, m.capacity);
+  valued('requiredSkillLevel', input.requiredSkillLevel, m.requiredSkillLevel);
+  valued('pricePerPlayer', input.pricePerPlayer, m.pricePerPlayer === null ? null : Number(m.pricePerPlayer));
+  valued('cityId', input.cityId, m.cityId);
+  if (timeChanged) {
+    changedFields.push('time');
+    before.startAt = m.startAt.toISOString();
+    before.endAt = m.endAt.toISOString();
+    after.startAt = startAt.toISOString();
+    after.endAt = endAt.toISOString();
+  }
+  return { changedFields, before, after };
+}
+
 /** 400 when the city id does not exist (cities are seeded reference data). */
 async function assertCityExists(cityId?: string | null) {
   if (cityId && !(await prisma.city.findUnique({ where: { id: cityId } }))) throw new AppError(400, 'INVALID_CITY', 'Unknown city');
@@ -266,12 +317,27 @@ async function teamSides(matchId: string, format: keyof typeof FORMAT_SIZE) {
   return sides.map((s) => ({ side: s.side, team: s.team, rosterCount: s._count.participants, required: FORMAT_SIZE[format] }));
 }
 
+/** The start / end an edit results in, relative to the match as it is NOW (read under the lock). */
+function resolveEditedTimes(cur: MatchRow, input: z.infer<typeof updateMatchSchema>) {
+  const startAt = input.startAt ? new Date(input.startAt) : cur.startAt;
+  const keptDuration = cur.endAt.getTime() - cur.startAt.getTime();
+  const endAt = input.endAt
+    ? new Date(input.endAt)
+    : input.durationMinutes
+      ? new Date(startAt.getTime() + input.durationMinutes * MINUTE)
+      : input.startAt
+        ? new Date(startAt.getTime() + keptDuration)
+        : cur.endAt;
+  const timeChanged = startAt.getTime() !== cur.startAt.getTime() || endAt.getTime() !== cur.endAt.getTime();
+  return { startAt, endAt, timeChanged };
+}
+
 /**
  * Edits an OPEN / FULL open match (organizer or admin). Rules enforced by the DB triggers, so they hold under races:
  * capacity never below the confirmed count and not after start; the time can change only while nobody is confirmed (D12).
  * Pending requesters are notified when the time changes.
  */
-export async function updateMatch(actor: Actor, id: string, input: z.infer<typeof updateMatchSchema>) {
+export async function updateMatch(actor: Actor, id: string, input: z.infer<typeof updateMatchSchema>, requestId?: string) {
   const m = await loadManageableMatch(id, actor);
   if (m.type !== 'OPEN_MATCH' || !['OPEN', 'FULL'].includes(m.status)) {
     throw new AppError(409, 'INVALID_STATE', 'Only open matches can be edited');
@@ -281,19 +347,14 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
     throw new AppError(400, 'INVALID_CAPACITY', 'Capacity cannot exceed the total players of the format');
   }
 
-  const startAt = input.startAt ? new Date(input.startAt) : m.startAt;
-  const keptDuration = m.endAt.getTime() - m.startAt.getTime();
-  const endAt = input.endAt
-    ? new Date(input.endAt)
-    : input.durationMinutes
-      ? new Date(startAt.getTime() + input.durationMinutes * MINUTE)
-      : input.startAt
-        ? new Date(startAt.getTime() + keptDuration)
-        : m.endAt;
-  const timeChanged = startAt.getTime() !== m.startAt.getTime() || endAt.getTime() !== m.endAt.getTime();
-
   await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
-    await lockMatch(tx, id); // match row first, always (see lib/locks.ts)
+    const lockedStatus = await lockMatch(tx, id); // match row first, always (see lib/locks.ts)
+    // Everything below works on the row AS LOCKED, never on the copy read before the transaction: another edit, a cancel or a
+    // start may have committed in between. The same locked state decides what changed, is updated, and is written to the audit log.
+    if (!['OPEN', 'FULL'].includes(lockedStatus)) throw new AppError(409, 'INVALID_STATE', 'Only open matches can be edited');
+    const cur = await tx.match.findUniqueOrThrow({ where: { id }, include: matchInclude });
+    const { startAt, endAt, timeChanged } = resolveEditedTimes(cur, input);
+
     await tx.match.update({
       where: { id },
       data: {
@@ -311,13 +372,20 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
         ...(timeChanged ? { startAt, endAt } : {}), // DB trigger: only while nobody is confirmed (D12)
       },
     });
+    if (isAdminOverride(actor, cur.organizerId)) {
+      // Written right after the update, inside the same transaction. An edit that changes nothing leaves no record.
+      const edit = describeMatchEdit(cur, input, startAt, endAt, timeChanged);
+      if (edit.changedFields.length > 0) {
+        await recordAdminAudit(tx, { actorId: actor.userId, action: 'MATCH_EDITED_BY_ADMIN', targetType: 'MATCH', targetId: id, metadata: { organizerId: cur.organizerId, ...edit }, requestId });
+      }
+    }
     if (input.requiredPositions) {
       await tx.matchRequiredPosition.deleteMany({ where: { matchId: id } });
       await tx.matchRequiredPosition.createMany({ data: input.requiredPositions.map((p) => ({ matchId: id, ...p })) });
     }
     if (timeChanged) {
       const pending = await tx.matchRequest.findMany({ where: { matchId: id, status: 'PENDING' }, select: { userId: true } });
-      await notify(tx, pending.map((r) => r.userId), 'MATCH_TIME_CHANGED', { matchId: id, title: m.title, startAt: startAt.toISOString() }, { type: 'match', id });
+      await notify(tx, pending.map((r) => r.userId), 'MATCH_TIME_CHANGED', { matchId: id, title: cur.title, startAt: startAt.toISOString() }, { type: 'match', id });
     }
   }));
   return getMatch(actor, id);
@@ -329,7 +397,7 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
  * invitations. `releaseBooking` also cancels the organizer's own in-app booking so the venue slot is freed.
  * Everything happens in ONE transaction, so the match, its participants and the booking never disagree.
  */
-export async function cancelMatch(actor: Actor, id: string, reason?: string | null, releaseBooking = false) {
+export async function cancelMatch(actor: Actor, id: string, reason?: string | null, releaseBooking = false, requestId?: string) {
   const m = await loadManageableMatch(id, actor);
   // Organizers cancel before start (or recover a CLOSED_UNCONFIRMED match). Cancelling a match
   // that is already running is an admin decision.
@@ -349,6 +417,9 @@ export async function cancelMatch(actor: Actor, id: string, reason?: string | nu
     await markAdminActor(tx, actor);
     // DB trigger: participants -> MATCH_CANCELLED (slots freed, no penalty), pending requests/invitations expire.
     await tx.match.update({ where: { id }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason ?? undefined } });
+    if (isAdminOverride(actor, m.organizerId)) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'MATCH_CANCELLED_BY_ADMIN', targetType: 'MATCH', targetId: id, reason, metadata: { fromStatus, toStatus: 'CANCELLED', organizerId: m.organizerId }, requestId });
+    }
     await recordEvent(tx, id, actor.userId, fromStatus, 'CANCELLED', reason);
     if (releaseBooking && m.bookingId) await releaseBookingForMatch(tx, actor, m.bookingId);
     await notify(tx, [...participants, ...requests].map((r) => r.userId).filter((u) => u !== actor.userId), 'MATCH_CANCELLED',
@@ -358,7 +429,7 @@ export async function cancelMatch(actor: Actor, id: string, reason?: string | nu
 }
 
 /** Only the organizer (or an admin) confirms the match really took place (D5). */
-export async function completeMatch(actor: Actor, id: string) {
+export async function completeMatch(actor: Actor, id: string, requestId?: string) {
   const m = await loadManageableMatch(id, actor);
   if (!['IN_PROGRESS', 'CLOSED_UNCONFIRMED'].includes(m.status)) {
     throw new AppError(409, 'INVALID_STATE', 'Only a started match can be completed');
@@ -368,6 +439,11 @@ export async function completeMatch(actor: Actor, id: string) {
     await markAdminActor(tx, actor);
     // DB trigger: stamps completed_at, finalizes attendance (anyone not NO_SHOW -> ATTENDED), 7-day recovery rule.
     await tx.match.update({ where: { id }, data: { status: 'COMPLETED', completedById: actor.userId } });
+    if (isAdminOverride(actor, m.organizerId)) {
+      // Completing a CLOSED_UNCONFIRMED match is a recovery (after the organizer's 7-day window only an admin can do it).
+      const action = fromStatus === 'CLOSED_UNCONFIRMED' ? 'MATCH_RECOVERED_BY_ADMIN' : 'MATCH_COMPLETED_BY_ADMIN';
+      await recordAdminAudit(tx, { actorId: actor.userId, action, targetType: 'MATCH', targetId: id, metadata: { fromStatus, toStatus: 'COMPLETED', organizerId: m.organizerId }, requestId });
+    }
     await recordEvent(tx, id, actor.userId, fromStatus, 'COMPLETED');
   }));
   return getMatch(actor, id);

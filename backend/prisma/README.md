@@ -31,6 +31,7 @@ Apply: `npx prisma migrate deploy` (needs `DATABASE_URL`). Verified: migrations 
 | TEAM_CHALLENGE: no capacity, no requests, exactly 2 sides, roster per side | CHECK + `fym_request_guard` + deferred `fym_match_teams_complete` + participant guard |
 | Reviews: completed match, both attended, 7-day window, once per pair | `fym_review_guard` + unique |
 | Booking shape (IN_APP vs EXTERNAL) | `chk_booking_source_shape` |
+| Admin audit log is append-only (AUD-01, migration `20261117000400_admin_audit_log`) | `trg_admin_audit_immutable` refuses UPDATE / DELETE and `trg_admin_audit_no_truncate` refuses TRUNCATE (both `fym_audit_immutable`; a superuser can still disable them, see the migration header); `chk_admin_audit_reason_length`, `chk_admin_audit_metadata_object` |
 
 ## Error codes the service must map
 Triggers raise `FYM_*` (SQLSTATE `P0001`); constraints keep standard codes: `23P01` overlap, `23505` duplicate, `23514` shape/range.

@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { canSeeMessage } from '../chat/chat.service';
@@ -113,7 +114,7 @@ export async function adminListReports(q: z.infer<typeof adminListReportsSchema>
 const NEXT_STATUS: Record<string, string[]> = { OPEN: ['IN_REVIEW', 'RESOLVED', 'DISMISSED'], IN_REVIEW: ['RESOLVED', 'DISMISSED'], RESOLVED: [], DISMISSED: [] };
 
 /** Moves a report through the queue; closing it (RESOLVED / DISMISSED) records the admin and notifies the reporter. */
-export async function updateReportStatus(adminId: string, reportId: string, status: 'IN_REVIEW' | 'RESOLVED' | 'DISMISSED') {
+export async function updateReportStatus(adminId: string, reportId: string, status: 'IN_REVIEW' | 'RESOLVED' | 'DISMISSED', requestId?: string) {
   const report = await prisma.$transaction(async (tx) => {
     const cur = await tx.report.findUnique({ where: { id: reportId } });
     if (!cur) throw new AppError(404, 'REPORT_NOT_FOUND', 'Report not found');
@@ -125,6 +126,7 @@ export async function updateReportStatus(adminId: string, reportId: string, stat
       data: { status, ...(final ? { resolvedById: adminId, resolvedAt: new Date() } : {}) },
     });
     if (claimed.count === 0) throw new AppError(409, 'INVALID_STATE', 'This report was just updated by someone else');
+    await recordAdminAudit(tx, { actorId: adminId, action: 'REPORT_STATUS_CHANGED', targetType: 'REPORT', targetId: reportId, metadata: { fromStatus: cur.status, toStatus: status }, requestId });
     if (final) await notify(tx, [cur.reporterId], 'REPORT_RESOLVED', { reportId, status }, { type: 'report', id: reportId });
     return tx.report.findUniqueOrThrow({ where: { id: reportId } });
   });

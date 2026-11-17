@@ -24,15 +24,15 @@ export const get = async (req: Request, res: Response) => {
 
 export const update = async (req: Request, res: Response) => {
   const { matchId } = valid(req, 'params', matchIdParams);
-  res.json({ match: await matches.updateMatch(actorOf(req), matchId, valid(req, 'body', updateMatchSchema)) });
+  res.json({ match: await matches.updateMatch(actorOf(req), matchId, valid(req, 'body', updateMatchSchema), String(req.id)) });
 };
 
 export const cancel = async (req: Request, res: Response) => {
   const { matchId } = valid(req, 'params', matchIdParams);
   const { reason, releaseBooking } = valid(req, 'body', cancelSchema);
-  res.json({ match: await matches.cancelMatch(actorOf(req), matchId, reason, releaseBooking) });
+  res.json({ match: await matches.cancelMatch(actorOf(req), matchId, reason, releaseBooking, String(req.id)) });
 };
 
 export const complete = async (req: Request, res: Response) => {
-  res.json({ match: await matches.completeMatch(actorOf(req), valid(req, 'params', matchIdParams).matchId) });
+  res.json({ match: await matches.completeMatch(actorOf(req), valid(req, 'params', matchIdParams).matchId, String(req.id)) });
 };
