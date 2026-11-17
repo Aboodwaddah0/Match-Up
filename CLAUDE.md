@@ -39,9 +39,10 @@ Database design (pre-ERD): [DATABASE_DESIGN.md](DATABASE_DESIGN.md).
 6. Notifications: list, unread count, mark read / read-all, device-token registration (push delivery NOT wired; rows are written as outbox by notify()). 7. Reviews and reputation: attendees of a COMPLETED match review each other once within 7 days (scores 1-5 for sportsmanship, skill, reliability + comment); rating cache on the profile; reliability 0-100 derived from attendance (no-show weighs 2x a late cancellation). The organizer is not a participant, so only players review.
 8. Safety: user blocking (symmetric in effect, drops pending join requests), reports (USER/MATCH/VENUE/TEAM; one open report per target, 20/day) and an admin triage queue (OPEN > IN_REVIEW > RESOLVED/DISMISSED, reporter notified).
 9. E-mail: SMTP via nodemailer (SMTP_URL, MAIL_FROM; provider-agnostic; failures logged, never fatal).
-10. Chat: match / team / direct conversations (membership derived live from match participants / team members), message history with cursor, unread counts, read-only after cancel or 7 days post-match, Socket.IO push (message:new). DMs only between people sharing a match or team (my default, easy to loosen).
-149 integration tests pass (run `cd backend && npm test`); verified in Docker.
+10. Admin: user search / suspend / reactivate (immediate, sessions revoked), venue suspend / reactivate, counters, report triage.
+11. Chat: match / team / direct conversations (membership derived live from match participants / team members), message history with cursor, unread counts, read-only after cancel or 7 days post-match, Socket.IO push (message:new). DMs only between people sharing a match or team (my default, easy to loosen).
+157 integration tests pass (run `cd backend && npm test`); verified in Docker.
 
-**Not started:** push delivery, admin (beyond report triage), image upload, mobile app.
+**Not started:** push delivery, image upload, mobile app.
 
 **Gotchas:** on Windows, run `docker compose restart api` after editing source (file watching does not reach the container). Heredocs with long text get truncated in the shell tool: write scripts to files instead.

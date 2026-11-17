@@ -7,6 +7,7 @@ import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/error-handler';
 import { authRouter } from './modules/auth/auth.routes';
 import { bookingsRouter, venueBookingsRouter } from './modules/bookings/bookings.routes';
+import { adminRouter } from './modules/admin/admin.routes';
 import { chatRouter } from './modules/chat/chat.routes';
 import { citiesRouter } from './modules/cities/cities.routes';
 import { healthRouter } from './modules/health/health.routes';
@@ -36,6 +37,7 @@ export function createApp() {
   app.use('/api/v1/chats', chatRouter);
   app.use('/api/v1/reports', reportsRouter);
   app.use('/api/v1/admin/reports', adminReportsRouter);
+  app.use('/api/v1/admin', adminRouter);
   app.use('/api/v1/players', playersRouter);
   app.use('/api/v1/cities', citiesRouter);
   app.use('/api/v1/matches/:matchId/reviews', matchReviewsRouter);

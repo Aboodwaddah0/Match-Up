@@ -31,7 +31,9 @@ export type NotificationType =
   | 'CHALLENGE_REJECTED'
   | 'CHALLENGE_CANCELLED'
   | 'REVIEW_RECEIVED'
-  | 'REPORT_RESOLVED';
+  | 'REPORT_RESOLVED'
+  | 'VENUE_SUSPENDED'
+  | 'VENUE_REACTIVATED';
 
 /**
  * Transactional outbox: call this with the SAME transaction client as the state change, so a

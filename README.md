@@ -188,6 +188,18 @@ The player profile shows `rating` (average of the three scores, count) and `reli
 
 Realtime: connect Socket.IO to the API origin with `auth: { token: <accessToken> }`; members receive `message:new` `{id, conversationId, conversationType, senderId, body, createdAt}`. It is best-effort; REST is the source of truth, so after a reconnect fetch history. Messages can be reported (`targetType: MESSAGE`).
 
+## Admin API (platformRole ADMIN only)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/users?q&status&page`, `GET /admin/users/:id` | find users; counters (matches, no-shows, reports against, venues) |
+| `POST /admin/users/:id/suspend` / `reactivate` | suspension is immediate (token stops working, sessions revoked, login refused); cannot suspend yourself or another admin |
+| `GET /admin/venues?q&status`, `POST /admin/venues/:id/suspend` / `reactivate` | a suspended venue leaves search and takes no new bookings; existing bookings are untouched; the owner is notified |
+| `GET /admin/stats` | counters |
+| `GET/PATCH /admin/reports` | moderation queue (see Blocking and reports) |
+
+Make the first admin by hand: `UPDATE "user" SET platform_role = 'ADMIN' WHERE email = 'you@example.com';`
+
 ## Tests
 
 ```bash
