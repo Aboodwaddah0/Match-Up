@@ -17,12 +17,20 @@ function ageFrom(dob: Date | null): number | null {
   return age;
 }
 
-/** Match history stats are DERIVED from participant rows (never stored). */
-async function statsFor(userId: string) {
+/**
+ * Match history stats are DERIVED from participant rows (never stored).
+ * D16: a match that ended CANCELLED or CLOSED_UNCONFIRMED ("unknown whether it happened") produces no stats and no
+ * reliability change, so late cancellations and no-shows on such matches are not counted. Every other status counts
+ * (a late cancellation is counted as soon as the player leaves). If an organizer later recovers a CLOSED_UNCONFIRMED
+ * match and completes it, its rows start counting again, because the filter looks at the match's CURRENT status.
+ * `matchesPlayed` needs no filter: ATTENDED is only ever set when the match is COMPLETED.
+ */
+export async function statsFor(userId: string) {
+  const counts: { match: { status: { notIn: ('CANCELLED' | 'CLOSED_UNCONFIRMED')[] } } } = { match: { status: { notIn: ['CANCELLED', 'CLOSED_UNCONFIRMED'] } } };
   const [matchesPlayed, lateCancellations, noShows] = await Promise.all([
     prisma.matchParticipant.count({ where: { userId, status: 'CONFIRMED', attendanceStatus: 'ATTENDED' } }),
-    prisma.matchParticipant.count({ where: { userId, isLateCancellation: true } }),
-    prisma.matchParticipant.count({ where: { userId, attendanceStatus: 'NO_SHOW' } }),
+    prisma.matchParticipant.count({ where: { userId, isLateCancellation: true, ...counts } }),
+    prisma.matchParticipant.count({ where: { userId, attendanceStatus: 'NO_SHOW', ...counts } }),
   ]);
   return { matchesPlayed, lateCancellations, noShows };
 }

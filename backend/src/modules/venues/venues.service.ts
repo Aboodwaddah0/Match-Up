@@ -87,8 +87,17 @@ export async function getVenue(actor: Actor, id: string) {
 export async function updateVenue(actor: Actor, id: string, input: z.infer<typeof updateVenueSchema>) {
   await requireVenuePermission(actor, id, 'EDIT_VENUE');
   if (input.cityId) await assertCity(input.cityId);
-  const v = await prisma.venue.update({ where: { id }, data: input, include: venueInclude });
-  return venueDto(v, { canSeeInactive: true });
+
+  if (input.status !== undefined) {
+    // An owner may switch the venue ACTIVE <-> INACTIVE, but must never undo an administrator's suspension (moderation
+    // would be meaningless). The "not SUSPENDED" condition is part of the UPDATE itself, so it is atomic: it also holds
+    // when an admin suspends the venue between our permission check and this write.
+    const r = await prisma.venue.updateMany({ where: { id, status: { not: 'SUSPENDED' } }, data: input });
+    if (r.count === 0) throw new AppError(403, 'VENUE_SUSPENDED', 'This venue was suspended by an administrator; contact support');
+  } else {
+    await prisma.venue.update({ where: { id }, data: input });
+  }
+  return venueDto(await load(id), { canSeeInactive: true });
 }
 
 /** Venues I own or work at. */

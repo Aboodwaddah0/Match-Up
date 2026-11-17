@@ -54,6 +54,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fym}:${POSTGRES_PASSWORD:-fym_dev_password}@db:5432/${POSTGRES_DB:-fym}?schema=public
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-only-secret-change-me-dev-only-secret-change-me}
       APP_URL: ${APP_URL:-http://localhost:3000}
+      VERIFY_EMAIL_URL: ${VERIFY_EMAIL_URL:-}
+      RESET_PASSWORD_URL: ${RESET_PASSWORD_URL:-}
+      TRUST_PROXY: ${TRUST_PROXY:-0}
       SMTP_URL: ${SMTP_URL:-}
       MAIL_FROM: ${MAIL_FROM:-Find Your Match <no-reply@localhost>}
     ports:

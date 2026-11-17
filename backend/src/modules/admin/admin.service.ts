@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
+import { statsFor } from '../players/players.service';
 import type { listUsersSchema, listVenuesSchema } from './admin.schemas';
 
 /*
@@ -31,14 +32,13 @@ export async function listUsers(q: z.infer<typeof listUsersSchema>) {
 export async function getUser(id: string) {
   const user = await prisma.user.findUnique({ where: { id }, select: userFields });
   if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
-  const [matchesOrganized, matchesPlayed, noShows, reportsAgainst, venuesOwned] = await Promise.all([
+  const [matchesOrganized, playerStats, reportsAgainst, venuesOwned] = await Promise.all([
     prisma.match.count({ where: { organizerId: id } }),
-    prisma.matchParticipant.count({ where: { userId: id, status: 'CONFIRMED', attendanceStatus: 'ATTENDED' } }),
-    prisma.matchParticipant.count({ where: { userId: id, attendanceStatus: 'NO_SHOW' } }),
+    statsFor(id), // same numbers (and the same D16 rule) as the player's own profile
     prisma.report.count({ where: { targetType: 'USER', targetId: id } }),
     prisma.venue.count({ where: { ownerId: id } }),
   ]);
-  return { user, stats: { matchesOrganized, matchesPlayed, noShows, reportsAgainst, venuesOwned } };
+  return { user, stats: { matchesOrganized, matchesPlayed: playerStats.matchesPlayed, noShows: playerStats.noShows, reportsAgainst, venuesOwned } };
 }
 
 /**

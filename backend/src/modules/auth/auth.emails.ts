@@ -1,6 +1,18 @@
+import { env } from '../../config/env';
+import { fillLinkTemplate } from '../../lib/links';
 import type { Email } from '../../lib/mailer';
 
 type Locale = 'ar' | 'en';
+
+/** The link in the verification e-mail (configurable with VERIFY_EMAIL_URL, see lib/links.ts). */
+export function verifyEmailLink(token: string): string {
+  return fillLinkTemplate(env.VERIFY_EMAIL_URL ?? `${env.APP_URL}/verify-email?token={token}`, token);
+}
+
+/** The link in the password-reset e-mail (configurable with RESET_PASSWORD_URL). */
+export function resetPasswordLink(token: string): string {
+  return fillLinkTemplate(env.RESET_PASSWORD_URL ?? `${env.APP_URL}/reset-password?token={token}`, token);
+}
 
 export function verifyEmailMessage(to: string, locale: Locale, link: string): Email {
   return locale === 'ar'

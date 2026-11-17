@@ -87,6 +87,38 @@ describe('admin', () => {
     expect((await api.call('GET', '/api/v1/venues', undefined, user.token)).body.venues).toHaveLength(1);
   });
 
+  it('an owner cannot lift an admin suspension, but can still edit other details and toggle INACTIVE while not suspended', async () => {
+    const { prisma } = await import('../src/lib/prisma');
+    const cityId = (await prisma.city.create({ data: { nameAr: 'نابلس', nameEn: 'Nablus' } })).id;
+    const owner = await makeUser(api, 'owner2@example.com');
+    const { venueId } = await setupVenue(api, owner, cityId);
+    const patch = (body: Record<string, unknown>) => api.call('PATCH', `/api/v1/venues/${venueId}`, body, owner.token);
+
+    // a normal owner toggle works while the venue is not suspended
+    expect((await patch({ status: 'INACTIVE' })).status).toBe(200);
+    expect((await patch({ status: 'ACTIVE' })).status).toBe(200);
+
+    expect((await api.call('POST', `${A}/venues/${venueId}/suspend`, { reason: 'fake venue' }, admin.token)).status).toBe(204);
+
+    // the bypass that used to work: owner sets ACTIVE on a suspended venue
+    for (const status of ['ACTIVE', 'INACTIVE']) {
+      const res = await patch({ status });
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('VENUE_SUSPENDED');
+    }
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).status).toBe('SUSPENDED');
+    expect((await api.call('GET', '/api/v1/venues', undefined, user.token)).body.venues).toHaveLength(0); // still hidden
+
+    // other edits are still allowed so the owner can fix what the admin objected to
+    const edit = await patch({ description: 'Updated description' });
+    expect(edit.status).toBe(200);
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: venueId } })).status).toBe('SUSPENDED');
+
+    // only the admin endpoint lifts it
+    expect((await api.call('POST', `${A}/venues/${venueId}/reactivate`, {}, admin.token)).status).toBe(204);
+    expect((await patch({ status: 'INACTIVE' })).status).toBe(200);
+  });
+
   it('stats counts things', async () => {
     const s = await api.call('GET', `${A}/stats`, undefined, admin.token);
     expect(s.status).toBe(200);

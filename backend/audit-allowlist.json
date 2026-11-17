@@ -1,0 +1,41 @@
+[
+  {
+    "package": "deepmerge-ts",
+    "severity": "high",
+    "advisory": "GHSA-ggr8-5vv4-36mx",
+    "advisoryUrl": "https://github.com/advisories/GHSA-ggr8-5vv4-36mx",
+    "weakness": "CWE-674 uncontrolled recursion: stack exhaustion when merging recursive object graphs",
+    "affected": "deepmerge-ts < 8.0.0 (installed: 7.1.5)",
+    "introducedVia": "prisma@6.19.3 -> @prisma/config@6.19.3 -> deepmerge-ts@7.1.5",
+    "rationale": "Used only by the Prisma CLI to merge its own configuration. It is not a dependency of @prisma/client (the runtime), is never imported by application code, and the production container starts with `node dist/server.js`, which never runs the CLI. The merged input is repository-controlled configuration, never request data, so an attacker cannot reach it.",
+    "fix": "Upgrade to Prisma 7.10.1 or later. That is a major version (new config file and client generator) and changes all database access, so it is a planned migration, not a patch.",
+    "approvedOn": "2026-11-17",
+    "expires": "2027-02-17"
+  },
+  {
+    "package": "@prisma/config",
+    "severity": "high",
+    "advisory": "GHSA-ggr8-5vv4-36mx",
+    "advisoryUrl": "https://github.com/advisories/GHSA-ggr8-5vv4-36mx",
+    "weakness": "CWE-674 via its dependency deepmerge-ts (same advisory)",
+    "affected": "@prisma/config 6.13.0-dev.1 - 7.10.0 and 8.1.0-dev.1 - 8.1.0-dev.4 (installed: 6.19.3)",
+    "introducedVia": "prisma@6.19.3 -> @prisma/config@6.19.3",
+    "rationale": "Transitive report of the deepmerge-ts advisory above; same reachability analysis (CLI only, not on the request path).",
+    "fix": "Upgrade to Prisma 7.10.1 or later (see deepmerge-ts entry).",
+    "approvedOn": "2026-11-17",
+    "expires": "2027-02-17"
+  },
+  {
+    "package": "prisma",
+    "severity": "high",
+    "advisory": "GHSA-ggr8-5vv4-36mx",
+    "advisoryUrl": "https://github.com/advisories/GHSA-ggr8-5vv4-36mx",
+    "weakness": "CWE-674 via @prisma/config -> deepmerge-ts (same advisory)",
+    "affected": "prisma 6.13.0-dev.1 - 7.10.0 and 8.0.0-rc.3 - 8.1.0-dev.4 (installed: 6.19.3; 6.19.3 is the newest 6.x release)",
+    "introducedVia": "direct dependency (the Prisma CLI: migrate, generate)",
+    "rationale": "Transitive report of the deepmerge-ts advisory above. The CLI runs at build and migration time on repository-controlled files; the API process never loads it.",
+    "fix": "Upgrade to Prisma 7.10.1 or later; planned migration (see deepmerge-ts entry).",
+    "approvedOn": "2026-11-17",
+    "expires": "2027-02-17"
+  }
+]

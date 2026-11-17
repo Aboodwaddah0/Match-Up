@@ -103,6 +103,30 @@ Dependencies between modules go one way and never in a circle: `matches -> booki
 Send `Authorization: Bearer <accessToken>`. Errors look like `{ "error": { "code", "message" } }`.
 E-mail goes out over any SMTP provider: set `SMTP_URL` (e.g. `smtps://user:pass@smtp.example.com:465`) and `MAIL_FROM` in `.env`. Without `SMTP_URL`, development prints e-mails in the API log (`docker compose logs api`) and production sends nothing. A failed send is logged and never breaks registration or reset; the user can request a new link.
 
+### Rate limits (authentication)
+
+Each endpoint has its own limiter, and password guessing is limited per ACCOUNT as well as per IP (many users share one IP: mobile carriers, offices, proxies). Limits are in `backend/src/middleware/rate-limit.ts`.
+
+| Endpoint | Limit |
+|---|---|
+| `POST /auth/login` | 100 / 15 min per IP, and 10 FAILED attempts / 15 min per e-mail (successful logins are not counted) |
+| `POST /auth/register` | 30 / hour per IP |
+| `POST /auth/refresh` | 120 / 15 min per IP |
+| `POST /auth/verify-email`, `/reset-password` | 30 / 15 min per IP (shared) |
+| `POST /auth/forgot-password` | 20 / hour per IP and 5 / hour per target e-mail |
+| `POST /auth/resend-verification` | 5 / hour per user |
+| `POST /auth/change-password` | 10 wrong passwords / 15 min per user |
+
+Counters live in memory per API instance: with several instances use a shared store (Redis), otherwise the effective limit is multiplied. **Behind a reverse proxy set `TRUST_PROXY=1`**, otherwise all clients share the proxy's IP (the API logs a warning at start-up in production when it is 0).
+
+### E-mail links
+
+Verification and password-reset e-mails contain a link. Set where it points with `VERIFY_EMAIL_URL` and `RESET_PASSWORD_URL`: a URL containing `{token}`, either a mobile deep link (`fym://verify-email?token={token}`) or a page of a web app. The app / page then calls `POST /auth/verify-email` or `POST /auth/reset-password` with the token. If unset, the link is `APP_URL/verify-email?token=...` (which only works once something serves that path).
+
+### Dependency audit
+
+`npm run audit:prod` (run in CI) fails on any HIGH or CRITICAL advisory in production dependencies unless it is listed with a reason and an expiry date in `backend/audit-allowlist.json`. Today the only exceptions are the Prisma CLI chain (`prisma`, `@prisma/config`, `deepmerge-ts`: not on the request path, fixed only by Prisma 7), valid until 2027-02-17.
+
 ## Matches API (`/api/v1/matches`, all need Bearer)
 
 | Endpoint | Who | Purpose |

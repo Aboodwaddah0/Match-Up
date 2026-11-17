@@ -1,6 +1,16 @@
 import { Router } from 'express';
 import { authenticate } from '../../middleware/authenticate';
-import { authLimiter, emailLimiter } from '../../middleware/rate-limit';
+import {
+  changePasswordLimiter,
+  forgotAccountLimiter,
+  forgotIpLimiter,
+  loginAccountLimiter,
+  loginIpLimiter,
+  refreshLimiter,
+  registerLimiter,
+  resendLimiter,
+  tokenLimiter,
+} from '../../middleware/rate-limit';
 import { validate } from '../../middleware/validate';
 import * as auth from './auth.controller';
 import {
@@ -15,16 +25,17 @@ import {
 
 export const authRouter = Router();
 
-// Rate limiters run before validation so that malformed floods are throttled too.
-authRouter.post('/register', authLimiter, validate({ body: registerSchema }), auth.register);
-authRouter.post('/login', authLimiter, validate({ body: loginSchema }), auth.login);
-authRouter.post('/refresh', authLimiter, validate({ body: refreshSchema }), auth.refresh);
+// Order matters: the per-IP limiter runs BEFORE validation (so malformed floods are throttled too); the per-account
+// limiter runs AFTER validation because it keys on the validated e-mail. See middleware/rate-limit.ts for the numbers.
+authRouter.post('/register', registerLimiter, validate({ body: registerSchema }), auth.register);
+authRouter.post('/login', loginIpLimiter, validate({ body: loginSchema }), loginAccountLimiter, auth.login);
+authRouter.post('/refresh', refreshLimiter, validate({ body: refreshSchema }), auth.refresh);
 authRouter.post('/logout', validate({ body: refreshSchema }), auth.logout);
 authRouter.post('/logout-all', authenticate, auth.logoutAll);
 
-authRouter.post('/verify-email', authLimiter, validate({ body: verifyEmailSchema }), auth.verifyEmail);
-authRouter.post('/resend-verification', authenticate, emailLimiter, auth.resendVerification);
+authRouter.post('/verify-email', tokenLimiter, validate({ body: verifyEmailSchema }), auth.verifyEmail);
+authRouter.post('/resend-verification', authenticate, resendLimiter, auth.resendVerification);
 
-authRouter.post('/forgot-password', emailLimiter, validate({ body: forgotPasswordSchema }), auth.forgotPassword);
-authRouter.post('/reset-password', authLimiter, validate({ body: resetPasswordSchema }), auth.resetPassword);
-authRouter.post('/change-password', authenticate, authLimiter, validate({ body: changePasswordSchema }), auth.changePassword);
+authRouter.post('/forgot-password', forgotIpLimiter, validate({ body: forgotPasswordSchema }), forgotAccountLimiter, auth.forgotPassword);
+authRouter.post('/reset-password', tokenLimiter, validate({ body: resetPasswordSchema }), auth.resetPassword);
+authRouter.post('/change-password', authenticate, changePasswordLimiter, validate({ body: changePasswordSchema }), auth.changePassword);

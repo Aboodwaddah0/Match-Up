@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { isLinkTemplate } from '../lib/links';
 
 dotenv.config({ quiet: true });
 
@@ -15,6 +16,10 @@ const schema = z.object({
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   // Base URL used in e-mail links (the mobile deep link / web app later).
   APP_URL: z.string().url().default('http://localhost:3000'),
+  // Where the links in verification / reset e-mails point. A template containing {token}: a mobile deep link such as
+  // fym://verify-email?token={token} or a web page. Empty = APP_URL + /verify-email (or /reset-password) ?token={token}.
+  VERIFY_EMAIL_URL: z.string().trim().optional().transform((v) => (v ? v : undefined)).refine((v) => v === undefined || isLinkTemplate(v), 'must be a URL containing {token}'),
+  RESET_PASSWORD_URL: z.string().trim().optional().transform((v) => (v ? v : undefined)).refine((v) => v === undefined || isLinkTemplate(v), 'must be a URL containing {token}'),
   // E-mail over SMTP, e.g. smtps://user:password@smtp.example.com:465 . Empty = log in development, skip in production.
   SMTP_URL: z.string().trim().optional().transform((v) => (v ? v : undefined)),
   MAIL_FROM: z.string().trim().min(3).default('Find Your Match <no-reply@localhost>'),

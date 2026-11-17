@@ -8,7 +8,7 @@ import { sendEmail } from '../../lib/mailer';
 import { burnPasswordCheck, hashPassword, verifyPassword } from '../../lib/password';
 import { prisma } from '../../lib/prisma';
 import { toPublicUser } from '../users/users.service';
-import { resetPasswordMessage, verifyEmailMessage } from './auth.emails';
+import { resetPasswordLink, resetPasswordMessage, verifyEmailLink, verifyEmailMessage } from './auth.emails';
 
 const HOUR = 3_600_000;
 const VERIFY_TTL_MS = 24 * HOUR;
@@ -73,7 +73,7 @@ async function consumeUserToken(tx: Tx, raw: string, type: TokenType): Promise<s
 
 async function sendVerificationEmail(user: Pick<User, 'id' | 'email' | 'locale'>): Promise<void> {
   const raw = await issueUserToken(user.id, 'EMAIL_VERIFY', VERIFY_TTL_MS);
-  await sendEmail(verifyEmailMessage(user.email, user.locale, `${env.APP_URL}/verify-email?token=${raw}`));
+  await sendEmail(verifyEmailMessage(user.email, user.locale, verifyEmailLink(raw)));
 }
 
 // ───────────── use cases ─────────────
@@ -180,7 +180,7 @@ export async function forgotPassword(email: string): Promise<void> {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user || user.status !== 'ACTIVE') return;
   const raw = await issueUserToken(user.id, 'PASSWORD_RESET', RESET_TTL_MS);
-  await sendEmail(resetPasswordMessage(user.email, user.locale, `${env.APP_URL}/reset-password?token=${raw}`));
+  await sendEmail(resetPasswordMessage(user.email, user.locale, resetPasswordLink(raw)));
 }
 
 /**
