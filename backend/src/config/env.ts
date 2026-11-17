@@ -15,6 +15,9 @@ const schema = z.object({
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().positive().default(30),
   // Base URL used in e-mail links (the mobile deep link / web app later).
   APP_URL: z.string().url().default('http://localhost:3000'),
+  // E-mail over SMTP, e.g. smtps://user:password@smtp.example.com:465 . Empty = log in development, skip in production.
+  SMTP_URL: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  MAIL_FROM: z.string().trim().min(3).default('Find Your Match <no-reply@localhost>'),
   // Background sweepers (match start / close-unconfirmed). Safe to run on several instances.
   JOBS_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   // Set to 1 when running behind one reverse proxy so rate limiting sees the real client IP.

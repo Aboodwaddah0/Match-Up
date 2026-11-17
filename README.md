@@ -85,7 +85,7 @@ backend/
 | `GET /players/:userId` | Bearer | public profile: age, city, positions, skill, derived stats; no birth date/coordinates/e-mail; 404 if blocked |
 
 Send `Authorization: Bearer <accessToken>`. Errors look like `{ "error": { "code", "message" } }`.
-In development, e-mails are printed in the API log (`docker compose logs api`); no real mail provider is wired yet.
+E-mail goes out over any SMTP provider: set `SMTP_URL` (e.g. `smtps://user:pass@smtp.example.com:465`) and `MAIL_FROM` in `.env`. Without `SMTP_URL`, development prints e-mails in the API log (`docker compose logs api`) and production sends nothing. A failed send is logged and never breaks registration or reset; the user can request a new link.
 
 ## Matches API (`/api/v1/matches`, all need Bearer)
 
