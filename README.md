@@ -117,7 +117,16 @@ Each endpoint has its own limiter, and password guessing is limited per ACCOUNT 
 | `POST /auth/resend-verification` | 5 / hour per user |
 | `POST /auth/change-password` | 10 wrong passwords / 15 min per user |
 
+**Whole API and creation endpoints.** On top of the table above, every request passes a global limiter (600 / minute per signed-in user, 300 / minute per anonymous IP; `/health` and `/health/db` are exempt), and the endpoints that create rows or send notifications have a per-user limit: matches 20 / hour, join requests 60 / hour, invitations (match and team) 60 / hour, venues 10 / hour, fields 60 / hour, bookings (in-app and external) 30 / hour, teams 10 / hour, challenges 20 / hour, opening direct chats 30 / hour, chat messages 60 / minute, device tokens 20 / hour. A refused request is `429 RATE_LIMITED` with `RateLimit-*` headers.
+
 Counters live in memory per API instance: with several instances use a shared store (Redis), otherwise the effective limit is multiplied. **Behind a reverse proxy set `TRUST_PROXY=1`**, otherwise all clients share the proxy's IP (the API logs a warning at start-up in production when it is 0).
+
+### Request ids, shutdown and production checks
+
+- Every response carries `X-Request-Id` (a client may send its own, 8-64 characters of `A-Za-z0-9._-`); the same id is in the log line and in the `requestId` field of every JSON error, so a user's error report can be matched to the log. Health probes are not logged. Oversized (413), badly encoded (400, 415) and malformed JSON (400) bodies are client errors, never 500.
+- On `SIGTERM` / `SIGINT` the API stops accepting connections, finishes requests in flight, disconnects websockets, waits for a sweeper run in progress and closes the database. If that takes longer than `SHUTDOWN_TIMEOUT_MS` (default 8000, keep it below the orchestrator's kill timeout, Docker's is 10 s) the remaining connections are cut and the exit code is 1. An unhandled rejection or uncaught exception is logged as fatal and shuts down the same way.
+- With `NODE_ENV=production` the API refuses to start (listing every problem) if `JWT_ACCESS_SECRET` is one of the placeholders from this repo, the database password is the development one, `SMTP_URL` is missing, or the e-mail links would point at `localhost` (set `APP_URL`, or both `VERIFY_EMAIL_URL` and `RESET_PASSWORD_URL`).
+- Websocket sessions end when the access token that opened them expires, and at once on suspension, logout-everywhere and password change or reset. After a disconnect the client reconnects with a fresh token and fetches history over REST.
 
 ### E-mail links
 
@@ -161,6 +170,8 @@ Note for Docker on Windows: file changes on the host do not always reach the con
 | `POST /fields/:fieldId/blocks`, `GET /fields/:fieldId/blocks`, `DELETE /blocks/:id` | MANAGE_AVAILABILITY | block time (maintenance, phone customers); `allFields: true` blocks the whole venue |
 | `GET/POST /venues/:id/staff`, `DELETE /venues/:id/staff/:userId` | MANAGE_STAFF | per-venue staff and permissions |
 | `POST/DELETE /venues/:id/images` | EDIT_VENUE | https image URLs (upload comes later) |
+
+Staff management cannot be used to escalate: nobody edits their own access, you can only grant permissions you hold yourself (a role's default permissions count as grants), only the owner (or an admin) grants `MANAGE_STAFF`, and staff who hold `MANAGE_STAFF` cannot be changed or removed by anyone but the owner. Anyone can remove themselves.
 | `POST /bookings` | verified e-mail | request a slot (PENDING, held 2h); price is snapshotted |
 | `POST /bookings/external` | verified e-mail | record a booking made outside the app (self-reported, never blocks a registered field) |
 | `GET /bookings/mine`, `GET /bookings/:id` | requester / venue staff | my bookings; details |
@@ -220,7 +231,7 @@ The player profile shows `rating` (average of the three scores, count) and `reli
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /chats` | my inbox: last message and unread count per chat, plus `totalUnread` |
+| `GET /chats?limit&before=<messageId>` | my inbox, newest activity first: last message and unread count per chat, plus `totalUnread` over ALL chats; `limit` 1-50 (default 30); pass `nextBefore` as `before` for the next page (null at the end) |
 | `POST /chats/match/:matchId`, `POST /chats/team/:teamId`, `POST /chats/direct` `{userId}` | open (get-or-create) a conversation and get its id; non-members get 404. Match chat = organizer + confirmed players; team chat = members; a DM needs a shared match or team and a verified e-mail |
 | `GET /chats/:id/messages?limit&before=<messageId>` | history, newest first; `nextBefore` pages back; messages from blocked users are hidden; `canWrite` |
 | `POST /chats/:id/messages` `{body}` | send (1-2000 chars, 20 per minute); a match chat is read-only after cancel or 7 days after the end |

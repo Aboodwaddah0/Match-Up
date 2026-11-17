@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { withDeadlockRetry } from '../../lib/db-errors';
+import { lockMatch } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
 import type { attendanceSchema } from './matches.schemas';
@@ -101,6 +102,8 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
 
   // Confirming a player can race with another match confirming the same player: retry if we lose a deadlock.
   await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    // Match row first, then the request (same order as cancel / start): without this, accept vs cancel deadlocked.
+    await lockMatch(tx, matchId);
     await tx.matchRequest.update({
       where: { id: requestId },
       data: { status: decision === 'accept' ? 'ACCEPTED' : 'REJECTED', decidedById: actor.userId },
@@ -154,34 +157,39 @@ export async function listParticipants(actor: Actor, matchId: string) {
 /** Leaving is allowed only before the match starts; <12h before start is recorded as a late cancellation (D4). */
 export async function leaveMatch(actor: Actor, matchId: string) {
   const m = await loadViewableMatch(matchId, actor);
-  return prisma.$transaction(async (tx) => {
+  return withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId); // match row first (see lib/locks.ts)
     const p = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId: actor.userId } } });
     if (!p || p.status !== 'CONFIRMED') throw new AppError(404, 'NOT_A_PARTICIPANT', 'You are not confirmed in this match');
     // DB trigger sets left_at + is_late_cancellation and reopens FULL -> OPEN.
     const left = await tx.matchParticipant.update({ where: { id: p.id }, data: { status: 'LEFT' } });
     await notify(tx, [m.organizerId], 'MATCH_PLAYER_LEFT', { matchId, title: m.title, userId: actor.userId, late: left.isLateCancellation }, { type: 'match', id: matchId });
     return { left: true, lateCancellation: left.isLateCancellation };
-  });
+  }));
 }
 
 /** The organizer removes a confirmed player before the start: status REMOVED, not a late cancellation, no penalty for the player. */
 export async function removeParticipant(actor: Actor, matchId: string, userId: string): Promise<void> {
   const m = await loadManageableMatch(matchId, actor);
-  await prisma.$transaction(async (tx) => {
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId);
     const p = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId } } });
     if (!p || p.status !== 'CONFIRMED') throw new AppError(404, 'NOT_A_PARTICIPANT', 'This player is not confirmed in the match');
     await tx.matchParticipant.update({ where: { id: p.id }, data: { status: 'REMOVED' } }); // not a late cancellation, no penalty
     await notify(tx, [userId], 'MATCH_REMOVED', { matchId, title: m.title }, { type: 'match', id: matchId });
-  });
+  }));
 }
 
 /** No-shows are recorded by the organizer after the start (D4); the DB refuses it earlier. */
 export async function setAttendance(actor: Actor, matchId: string, userId: string, status: z.infer<typeof attendanceSchema>['status']) {
   await loadManageableMatch(matchId, actor);
-  const p = await prisma.matchParticipant.update({
-    where: { matchId_userId: { matchId, userId } },
-    data: { attendanceStatus: status, attendanceConfirmedById: actor.userId },
-  });
+  const p = await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId); // the participant trigger locks the match row; take it first so the order is always match -> participant
+    return tx.matchParticipant.update({
+      where: { matchId_userId: { matchId, userId } },
+      data: { attendanceStatus: status, attendanceConfirmedById: actor.userId },
+    });
+  }));
   return { userId, attendanceStatus: p.attendanceStatus };
 }
 

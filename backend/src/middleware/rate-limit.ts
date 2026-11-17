@@ -1,6 +1,7 @@
 import type { Request } from 'express';
 import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { env } from '../config/env';
+import { verifyAccessTokenClaims } from '../lib/jwt';
 
 /*
  * Rate limits for the authentication endpoints. Design rules:
@@ -75,3 +76,44 @@ export const resendLimiter = limiter({ windowMinutes: 60, limit: 5, key: userOf 
 // ── authenticated ──
 /** change-password: 10 wrong-password attempts per 15 minutes per user (a stolen access token must not allow guessing). */
 export const changePasswordLimiter = limiter({ windowMinutes: 15, limit: 10, key: userOf, failuresOnly: true });
+
+// ── whole API (audit SEC-03) ──
+/**
+ * Safety net for the entire API, keyed by the signed-in user when the bearer token is valid, otherwise by IP.
+ * Cheap token check only; real authentication still happens in `authenticate`. Health probes are mounted before it.
+ * Per user 600/min, per anonymous IP 300/min: far above normal use, low enough to stop a runaway client or a script.
+ */
+const bearerSubject = async (req: Request): Promise<string | undefined> => {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return undefined;
+  try {
+    return `user:${(await verifyAccessTokenClaims(header.slice(7))).userId}`;
+  } catch {
+    return undefined;
+  }
+};
+
+export const apiLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: async (req) => ((await bearerSubject(req)) ? 600 : 300),
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: tooMany,
+  keyGenerator: async (req) => (await bearerSubject(req)) ?? ipKeyGenerator(req.ip ?? ''),
+  skip: () => env.NODE_ENV === 'test' && !rateLimitTesting.enabled,
+});
+
+// ── creation endpoints, per signed-in user (they create rows, send notifications or e-mails) ──
+const perUser = (limit: number, windowMinutes: number) => limiter({ windowMinutes, limit, key: userOf });
+
+export const createMatchLimiter = perUser(20, 60);
+export const joinRequestLimiter = perUser(60, 60);
+export const invitationLimiter = perUser(60, 60);
+export const createVenueLimiter = perUser(10, 60);
+export const createFieldLimiter = perUser(60, 60);
+export const bookingLimiter = perUser(30, 60);
+export const createTeamLimiter = perUser(10, 60);
+export const challengeLimiter = perUser(20, 60);
+export const directChatLimiter = perUser(30, 60);
+export const messageLimiter = perUser(60, 1);
+export const deviceLimiter = perUser(20, 60);

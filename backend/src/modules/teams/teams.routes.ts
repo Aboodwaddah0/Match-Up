@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
+import { challengeLimiter, createTeamLimiter, invitationLimiter } from '../../middleware/rate-limit';
 import { validate } from '../../middleware/validate';
 import * as challenges from './challenges.controller';
 import {
@@ -27,7 +28,7 @@ import * as teams from './teams.controller';
 export const teamsRouter = Router();
 teamsRouter.use(authenticate);
 
-teamsRouter.post('/', requireVerifiedEmail, validate({ body: createTeamSchema }), teams.create);
+teamsRouter.post('/', requireVerifiedEmail, createTeamLimiter, validate({ body: createTeamSchema }), teams.create);
 teamsRouter.get('/', validate({ query: searchTeamsSchema }), teams.search);
 teamsRouter.get('/mine', teams.mine);
 
@@ -47,11 +48,11 @@ teamsRouter.patch('/:teamId/members/:userId', validate({ params: teamMemberParam
 teamsRouter.post('/:teamId/transfer-captaincy', validate({ params: teamIdParams, body: transferSchema }), teams.transferCaptaincy);
 
 // invitations sent by the team
-teamsRouter.post('/:teamId/invitations', validate({ params: teamIdParams, body: inviteSchema }), teams.invite);
+teamsRouter.post('/:teamId/invitations', invitationLimiter, validate({ params: teamIdParams, body: inviteSchema }), teams.invite);
 teamsRouter.get('/:teamId/invitations', validate({ params: teamIdParams }), teams.listTeamInvitations);
 
 // challenges of one team
-teamsRouter.post('/:teamId/challenges', requireVerifiedEmail, validate({ params: teamIdParams, body: createChallengeSchema }), challenges.create);
+teamsRouter.post('/:teamId/challenges', requireVerifiedEmail, challengeLimiter, validate({ params: teamIdParams, body: createChallengeSchema }), challenges.create);
 teamsRouter.get('/:teamId/challenges', validate({ params: teamIdParams, query: challengesQuerySchema }), challenges.list);
 
 // roster for a team challenge match

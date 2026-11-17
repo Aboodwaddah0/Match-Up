@@ -1,14 +1,14 @@
 import { io as connect } from 'socket.io-client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { resetDb, startApp } from './helpers/client';
-import { makeUser, matchBody, type TestUser } from './helpers/users';
+import { inHours, makeUser, matchBody, type TestUser } from './helpers/users';
 
 let api: Awaited<ReturnType<typeof startApp>>;
 beforeAll(async () => {
   api = await startApp();
 });
 afterAll(async () => {
-  const { closeRealtime } = await import('../src/modules/chat/realtime');
+  const { closeRealtime } = await import('../src/lib/realtime');
   await closeRealtime();
   await api.close();
   const { prisma } = await import('../src/lib/prisma');
@@ -139,7 +139,7 @@ describe('team chat and direct messages', () => {
 
 describe('realtime', () => {
   it('pushes message:new to connected members only; rejects bad tokens', async () => {
-    const { attachRealtime } = await import('../src/modules/chat/realtime');
+    const { attachRealtime } = await import('../src/lib/realtime');
     attachRealtime(api.server);
     const { org, p1, out, matchId } = await matchWithPlayers();
     const { conversationId } = (await api.call('POST', `${C}/match/${matchId}`, {}, org.token)).body;
@@ -161,5 +161,131 @@ describe('realtime', () => {
     expect(got.p1![0]).toMatchObject({ body: 'live!', conversationId, senderId: org.userId });
     expect(got.out).toHaveLength(0);
     sockets.forEach((s) => s.close());
+  });
+});
+
+describe('realtime sessions end when the account or the token ends (AUTH-04)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function chatWithSocket(token: string, member: TestUser, org: TestUser) {
+    const { attachRealtime } = await import('../src/lib/realtime');
+    attachRealtime(api.server);
+    const m = (await api.call('POST', '/api/v1/matches', matchBody(), org.token)).body.match.id as string;
+    const r = await api.call('POST', `/api/v1/matches/${m}/requests`, {}, member.token);
+    await api.call('POST', `/api/v1/matches/${m}/requests/${r.body.request.id}/accept`, {}, org.token);
+    const { conversationId } = (await api.call('POST', `${C}/match/${m}`, {}, org.token)).body;
+    const sock = connect(api.base, { auth: { token }, transports: ['websocket'], reconnection: false });
+    await new Promise<void>((resolve, reject) => {
+      sock.on('connect', () => resolve());
+      sock.on('connect_error', (e) => reject(e));
+    });
+    const received: string[] = [];
+    sock.on('message:new', (msg: { body: string }) => received.push(msg.body));
+    return { sock, received, conversationId: conversationId as string };
+  }
+
+  it('a suspended account is disconnected at once and receives nothing more', async () => {
+    const org = await makeUser(api, 'rt-org@example.com');
+    const player = await makeUser(api, 'rt-player@example.com');
+    const admin = await makeUser(api, 'rt-admin@example.com');
+    const { prisma } = await import('../src/lib/prisma');
+    await prisma.user.update({ where: { id: admin.userId }, data: { platformRole: 'ADMIN' } });
+    const { sock, received, conversationId } = await chatWithSocket(player.token, player, org);
+
+    await send(org, conversationId, 'before');
+    await sleep(300);
+    expect(received).toEqual(['before']);
+
+    const dropped = new Promise<void>((r) => sock.on('disconnect', () => r()));
+    expect((await api.call('POST', `/api/v1/admin/users/${player.userId}/suspend`, {}, admin.token)).status).toBe(204);
+    await dropped;
+    expect(sock.connected).toBe(false);
+    await send(org, conversationId, 'after');
+    await sleep(300);
+    expect(received).toEqual(['before']);
+  });
+
+  it('logout-all disconnects every socket of the user', async () => {
+    const org = await makeUser(api, 'rt2-org@example.com');
+    const player = await makeUser(api, 'rt2-player@example.com');
+    const { sock } = await chatWithSocket(player.token, player, org);
+    const dropped = new Promise<void>((r) => sock.on('disconnect', () => r()));
+    expect((await api.call('POST', '/api/v1/auth/logout-all', {}, player.token)).status).toBe(204);
+    await dropped;
+    expect(sock.connected).toBe(false);
+  });
+
+  it('a socket is dropped when the access token that opened it expires', async () => {
+    const { SignJWT } = await import('jose');
+    const org = await makeUser(api, 'rt3-org@example.com');
+    const player = await makeUser(api, 'rt3-player@example.com');
+    const shortLived = await new SignJWT({})
+      .setProtectedHeader({ alg: 'HS256' })
+      .setSubject(player.userId)
+      .setIssuer('find-your-match-api')
+      .setAudience('find-your-match-app')
+      .setIssuedAt()
+      .setExpirationTime(Math.floor(Date.now() / 1000) + 2)
+      .sign(new TextEncoder().encode(process.env.JWT_ACCESS_SECRET!));
+    const { sock } = await chatWithSocket(shortLived, player, org);
+    expect(sock.connected).toBe(true);
+    const started = Date.now();
+    await new Promise<void>((r) => sock.on('disconnect', () => r()));
+    expect(Date.now() - started).toBeLessThan(4000);
+  }, 15_000);
+});
+
+describe('inbox pagination (PERF-01)', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function fiveChats() {
+    const org = await makeUser(api, 'inbox-org@example.com');
+    const p = await makeUser(api, 'inbox-player@example.com');
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const m = (await api.call('POST', '/api/v1/matches', matchBody({ title: `Inbox match ${i}`, startAt: inHours(48 + i * 6) }), org.token)).body.match.id as string;
+      const r = await api.call('POST', `/api/v1/matches/${m}/requests`, {}, p.token);
+      await api.call('POST', `/api/v1/matches/${m}/requests/${r.body.request.id}/accept`, {}, org.token);
+      const { conversationId } = (await api.call('POST', `${C}/match/${m}`, {}, org.token)).body;
+      expect((await send(org, conversationId, `hello ${i}`)).status).toBe(201);
+      ids.push(conversationId);
+      await sleep(15); // distinct timestamps
+    }
+    return { org, p, ids };
+  }
+
+  it('pages newest-first without repeats, reports the total unread over ALL chats and ends with a null cursor', async () => {
+    const { p, ids } = await fiveChats();
+    const seen: string[] = [];
+    let before: string | null = null;
+    let pages = 0;
+    do {
+      const res = await api.call('GET', `${C}?limit=2${before ? `&before=${before}` : ''}`, undefined, p.token);
+      expect(res.status).toBe(200);
+      expect(res.body.totalUnread).toBe(5);
+      seen.push(...res.body.chats.map((c: { id: string }) => c.id));
+      before = res.body.nextBefore;
+      pages++;
+    } while (before && pages < 10);
+    expect(pages).toBe(3);
+    expect(seen).toEqual([...ids].reverse());
+    expect(new Set(seen).size).toBe(5);
+  });
+
+  it('a new message moves its chat to the top and the cursor still works', async () => {
+    const { org, p, ids } = await fiveChats();
+    const first = await api.call('GET', `${C}?limit=2`, undefined, p.token);
+    await sleep(15);
+    await send(org, ids[0]!, 'bump'); // oldest chat becomes the newest
+    const rest = await api.call('GET', `${C}?limit=2&before=${first.body.nextBefore}`, undefined, p.token);
+    expect(rest.status).toBe(200);
+    expect(rest.body.chats.map((c: { id: string }) => c.id)).toEqual([ids[2], ids[1]]);
+    expect((await api.call('GET', `${C}?limit=1`, undefined, p.token)).body.chats[0].id).toBe(ids[0]);
+  });
+
+  it('rejects an unknown cursor and an out-of-range limit', async () => {
+    const { p } = await fiveChats();
+    expect((await api.call('GET', `${C}?before=00000000-0000-4000-8000-000000000000`, undefined, p.token)).status).toBe(400);
+    expect((await api.call('GET', `${C}?limit=500`, undefined, p.token)).status).toBe(400);
   });
 });

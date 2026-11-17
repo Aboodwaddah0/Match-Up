@@ -57,6 +57,7 @@ services:
       VERIFY_EMAIL_URL: ${VERIFY_EMAIL_URL:-}
       RESET_PASSWORD_URL: ${RESET_PASSWORD_URL:-}
       TRUST_PROXY: ${TRUST_PROXY:-0}
+      SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-8000}
       SMTP_URL: ${SMTP_URL:-}
       MAIL_FROM: ${MAIL_FROM:-Find Your Match <no-reply@localhost>}
     ports:

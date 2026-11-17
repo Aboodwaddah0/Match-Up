@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
 import { withDeadlockRetry } from '../../lib/db-errors';
+import { lockMatch } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
 import { getMatch } from '../matches/matches.service';
@@ -200,6 +201,7 @@ export async function addToRoster(actor: Actor, teamId: string, matchId: string,
   if (side.match.status !== 'SCHEDULED') throw new AppError(409, 'INVALID_STATE', 'The roster can only change before the match starts');
 
   await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId); // match row first (see lib/locks.ts)
     // One row per (match, user): a player who left or was removed is re-activated, not duplicated.
     const existing = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId } } });
     if (existing?.status === 'CONFIRMED') throw new AppError(409, 'ALREADY_PARTICIPANT', 'This player is already on a roster for this match');
@@ -214,12 +216,13 @@ export async function addToRoster(actor: Actor, teamId: string, matchId: string,
 export async function removeFromRoster(actor: Actor, teamId: string, matchId: string, userId: string) {
   await requireStaff(teamId, actor);
   const side = await loadSide(teamId, matchId);
-  await prisma.$transaction(async (tx) => {
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    await lockMatch(tx, matchId);
     const p = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId } } });
     if (!p || p.status !== 'CONFIRMED' || p.matchTeamId !== side.id) throw new AppError(404, 'NOT_A_PARTICIPANT', 'This player is not on your roster');
     await tx.matchParticipant.update({ where: { id: p.id }, data: { status: 'REMOVED' } }); // DB: only before start
     await notify(tx, [userId], 'TEAM_ROSTER_REMOVED', { matchId, teamId, title: side.match.title }, { type: 'match', id: matchId });
-  });
+  }));
   return getRoster(actor, teamId, matchId);
 }
 

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
+import { createFieldLimiter, createVenueLimiter } from '../../middleware/rate-limit';
 import { validate } from '../../middleware/validate';
 import * as fields from './fields.controller';
 import * as venues from './venues.controller';
@@ -30,11 +31,11 @@ venuesRouter.use(authenticate);
 
 venuesRouter.get('/', validate({ query: venueSearchSchema }), venues.search);
 venuesRouter.get('/mine', venues.mine);
-venuesRouter.post('/', requireVerifiedEmail, validate({ body: createVenueSchema }), venues.create);
+venuesRouter.post('/', requireVerifiedEmail, createVenueLimiter, validate({ body: createVenueSchema }), venues.create);
 venuesRouter.get('/:venueId', validate({ params: venueIdParams }), venues.get);
 venuesRouter.patch('/:venueId', validate({ params: venueIdParams, body: updateVenueSchema }), venues.update);
 
-venuesRouter.post('/:venueId/fields', validate({ params: venueIdParams, body: createFieldSchema }), fields.create);
+venuesRouter.post('/:venueId/fields', createFieldLimiter, validate({ params: venueIdParams, body: createFieldSchema }), fields.create);
 
 venuesRouter.get('/:venueId/staff', validate({ params: venueIdParams }), venues.listStaff);
 venuesRouter.post('/:venueId/staff', validate({ params: venueIdParams, body: staffSchema }), venues.addStaff);

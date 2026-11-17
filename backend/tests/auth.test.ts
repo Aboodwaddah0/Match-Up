@@ -98,7 +98,9 @@ describe('login and access control', () => {
     const unknown = await login('ghost@example.com');
     expect(wrong.status).toBe(401);
     expect(unknown.status).toBe(401);
-    expect(wrong.body).toEqual(unknown.body);
+    // identical apart from the per-request id (which exists precisely so each response can be found in the log)
+    const strip = (b: { error: Record<string, unknown> }) => ({ error: { ...b.error, requestId: undefined } });
+    expect(strip(wrong.body)).toEqual(strip(unknown.body));
   });
 
   it('protects /users/me', async () => {

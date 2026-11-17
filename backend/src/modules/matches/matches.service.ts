@@ -1,7 +1,9 @@
 import { Prisma, type MatchStatus } from '@prisma/client';
 import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
+import { withDeadlockRetry } from '../../lib/db-errors';
 import { AppError } from '../../lib/errors';
+import { lockMatch } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
 import { releaseBookingForMatch } from '../bookings/bookings.service';
@@ -91,10 +93,39 @@ export async function toDtos(rows: MatchRow[], actor: Actor, distances?: Map<str
 
 // ───────────────────────── access ─────────────────────────
 
-/** A match with its relations; 404 if it does not exist. No visibility check: use loadViewableMatch / loadManageableMatch for that. */
+/**
+ * Moves ONE match whose start time has passed from OPEN / FULL / SCHEDULED to IN_PROGRESS, right now.
+ * The background sweeper does this for every match once a minute, but correctness must not depend on a timer having fired
+ * (design principle): whoever touches a match after its start time first brings it up to date. The UPDATE re-checks the
+ * status and the DATABASE clock under a row lock, so racing with the sweeper (or another request) records the transition once.
+ * Returns true when this call moved the match.
+ */
+export async function startMatchIfDue(id: string): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ from_status: MatchStatus }[]>`
+      WITH due AS (
+        SELECT id, status FROM "match"
+         WHERE id = ${id}::uuid AND status IN ('OPEN', 'FULL', 'SCHEDULED') AND start_at <= now()
+         FOR NO KEY UPDATE)
+      UPDATE "match" m SET status = 'IN_PROGRESS' FROM due WHERE m.id = due.id
+      RETURNING due.status::text AS from_status`;
+    if (rows.length === 0) return false;
+    await tx.matchEvent.create({ data: { matchId: id, fromStatus: rows[0]!.from_status, toStatus: 'IN_PROGRESS', reason: 'auto: start time reached (on access)' } });
+    return true;
+  });
+}
+
+/**
+ * A match with its relations; 404 if it does not exist. No visibility check: use loadViewableMatch / loadManageableMatch for that.
+ * A match that is past its start time but still OPEN / FULL / SCHEDULED (the sweeper has not run yet) is started first, so every
+ * caller sees and enforces the real state (no cancelling a running match, attendance and completion allowed).
+ */
 export async function loadMatch(id: string): Promise<MatchRow> {
-  const m = await prisma.match.findUnique({ where: { id }, include: matchInclude });
+  let m = await prisma.match.findUnique({ where: { id }, include: matchInclude });
   if (!m) throw new AppError(404, 'MATCH_NOT_FOUND', 'Match not found');
+  if (m.startAt <= new Date() && ['OPEN', 'FULL', 'SCHEDULED'].includes(m.status) && (await startMatchIfDue(id))) {
+    m = await prisma.match.findUniqueOrThrow({ where: { id }, include: matchInclude });
+  }
   return m;
 }
 
@@ -261,7 +292,8 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
         : m.endAt;
   const timeChanged = startAt.getTime() !== m.startAt.getTime() || endAt.getTime() !== m.endAt.getTime();
 
-  await prisma.$transaction(async (tx) => {
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    await lockMatch(tx, id); // match row first, always (see lib/locks.ts)
     await tx.match.update({
       where: { id },
       data: {
@@ -287,7 +319,7 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
       const pending = await tx.matchRequest.findMany({ where: { matchId: id, status: 'PENDING' }, select: { userId: true } });
       await notify(tx, pending.map((r) => r.userId), 'MATCH_TIME_CHANGED', { matchId: id, title: m.title, startAt: startAt.toISOString() }, { type: 'match', id });
     }
-  });
+  }));
   return getMatch(actor, id);
 }
 
@@ -307,7 +339,9 @@ export async function cancelMatch(actor: Actor, id: string, reason?: string | nu
     throw new AppError(409, 'INVALID_STATE', 'This match cannot be cancelled in its current status');
   }
 
-  await prisma.$transaction(async (tx) => {
+  // Retried as a whole if Postgres picks it as a deadlock victim; the lock order below makes that rare.
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    const fromStatus = await lockMatch(tx, id); // match row first: a concurrent accept / leave queues behind us instead of deadlocking
     const [participants, requests] = await Promise.all([
       tx.matchParticipant.findMany({ where: { matchId: id, status: 'CONFIRMED' }, select: { userId: true } }),
       tx.matchRequest.findMany({ where: { matchId: id, status: 'PENDING' }, select: { userId: true } }),
@@ -315,11 +349,11 @@ export async function cancelMatch(actor: Actor, id: string, reason?: string | nu
     await markAdminActor(tx, actor);
     // DB trigger: participants -> MATCH_CANCELLED (slots freed, no penalty), pending requests/invitations expire.
     await tx.match.update({ where: { id }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason ?? undefined } });
-    await recordEvent(tx, id, actor.userId, m.status, 'CANCELLED', reason);
+    await recordEvent(tx, id, actor.userId, fromStatus, 'CANCELLED', reason);
     if (releaseBooking && m.bookingId) await releaseBookingForMatch(tx, actor, m.bookingId);
     await notify(tx, [...participants, ...requests].map((r) => r.userId).filter((u) => u !== actor.userId), 'MATCH_CANCELLED',
       { matchId: id, title: m.title, reason: reason ?? null }, { type: 'match', id });
-  });
+  }));
   return getMatch(actor, id);
 }
 
@@ -329,12 +363,13 @@ export async function completeMatch(actor: Actor, id: string) {
   if (!['IN_PROGRESS', 'CLOSED_UNCONFIRMED'].includes(m.status)) {
     throw new AppError(409, 'INVALID_STATE', 'Only a started match can be completed');
   }
-  await prisma.$transaction(async (tx) => {
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
+    const fromStatus = await lockMatch(tx, id);
     await markAdminActor(tx, actor);
     // DB trigger: stamps completed_at, finalizes attendance (anyone not NO_SHOW -> ATTENDED), 7-day recovery rule.
     await tx.match.update({ where: { id }, data: { status: 'COMPLETED', completedById: actor.userId } });
-    await recordEvent(tx, id, actor.userId, m.status, 'COMPLETED');
-  });
+    await recordEvent(tx, id, actor.userId, fromStatus, 'COMPLETED');
+  }));
   return getMatch(actor, id);
 }
 

@@ -1,11 +1,12 @@
-import type { Conversation, Prisma } from '@prisma/client';
+import { Prisma, type Conversation } from '@prisma/client';
 import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
+import { emitToUsers } from '../../lib/realtime';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
-import type { listMessagesSchema } from './chat.schemas';
-import { emitToUsers } from './realtime';
+import type { listChatsSchema, listMessagesSchema } from './chat.schemas';
+
 
 /*
  * Chat. Membership is DERIVED live from the source of truth, so it can never drift:
@@ -200,50 +201,88 @@ export async function canSeeMessage(userId: string, messageId: string): Promise<
 
 // ───────────────────────── inbox ─────────────────────────
 
-export async function listChats(actor: Actor) {
+/**
+ * Inbox: conversations that have a visible message, newest activity first, paged with a keyset cursor (audit PERF-01).
+ * `before` is the id of the last message of the last chat on the previous page (`nextBefore`), so a page never repeats or
+ * skips a chat even while new messages arrive. One aggregate query finds the page (last message, unread count, blocked
+ * users filtered out); two batched reads then fetch the related rows. The number of statements does not depend on how
+ * many chats the user has. `totalUnread` always covers ALL chats, not just the page.
+ */
+export async function listChats(actor: Actor, q: z.infer<typeof listChatsSchema>) {
   const me = actor.userId;
-  const convs = await prisma.conversation.findMany({
-    where: {
-      messages: { some: {} },
-      OR: [
-        { match: { OR: [{ organizerId: me }, { participants: { some: { userId: me, status: 'CONFIRMED' } } }] } },
-        { team: { members: { some: { userId: me } } } },
-        { type: 'DIRECT', participants: { some: { userId: me } } },
-      ],
-    },
-    include: {
-      match: { select: { id: true, title: true, startAt: true, status: true } },
-      team: { select: { id: true, name: true, logoUrl: true } },
-      participants: { include: { user: userSummary } },
-    },
+  if (q.before && !(await prisma.message.findUnique({ where: { id: q.before }, select: { id: true } }))) {
+    throw new AppError(400, 'INVALID_CURSOR', 'Unknown message to page before');
+  }
+  const cursor = q.before ? Prisma.sql`WHERE (last_at, last_id) < (SELECT created_at, id FROM message WHERE id = ${q.before}::uuid)` : Prisma.empty;
+
+  const page = await prisma.$queryRaw<{ id: string; last_id: string; unread: number; total_unread: number }[]>`
+    WITH hidden AS (
+      SELECT CASE WHEN blocker_id = ${me}::uuid THEN blocked_id ELSE blocker_id END AS user_id
+      FROM blocked_user WHERE blocker_id = ${me}::uuid OR blocked_id = ${me}::uuid
+    ),
+    mine AS (
+      SELECT c.id, cp.last_read_at
+      FROM conversation c
+      LEFT JOIN conversation_participant cp ON cp.conversation_id = c.id AND cp.user_id = ${me}::uuid
+      WHERE (c.type = 'MATCH' AND EXISTS (
+              SELECT 1 FROM match m WHERE m.id = c.match_id AND (m.organizer_id = ${me}::uuid OR EXISTS (
+                SELECT 1 FROM match_participant mp WHERE mp.match_id = m.id AND mp.user_id = ${me}::uuid AND mp.status = 'CONFIRMED'))))
+         OR (c.type = 'TEAM' AND EXISTS (SELECT 1 FROM team_member tm WHERE tm.team_id = c.team_id AND tm.user_id = ${me}::uuid))
+         OR (c.type = 'DIRECT' AND cp.user_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM conversation_participant o JOIN hidden h ON h.user_id = o.user_id WHERE o.conversation_id = c.id))
+    ),
+    stats AS (
+      SELECT mine.id, last.id AS last_id, last.created_at AS last_at,
+             (SELECT count(*)::int FROM message m
+               WHERE m.conversation_id = mine.id AND m.sender_id <> ${me}::uuid
+                 AND m.sender_id NOT IN (SELECT user_id FROM hidden)
+                 AND (mine.last_read_at IS NULL OR m.created_at > mine.last_read_at)) AS unread
+      FROM mine
+      JOIN LATERAL (
+        SELECT m.id, m.created_at FROM message m
+        WHERE m.conversation_id = mine.id AND m.sender_id NOT IN (SELECT user_id FROM hidden)
+        ORDER BY m.created_at DESC, m.id DESC LIMIT 1
+      ) last ON true
+    ),
+    totals AS (SELECT id, last_id, last_at, unread, COALESCE(SUM(unread) OVER (), 0)::int AS total_unread FROM stats)
+    SELECT id, last_id, unread, total_unread FROM totals
+    ${cursor}
+    ORDER BY last_at DESC, last_id DESC
+    LIMIT ${q.limit + 1}`;
+
+  const rows = page.slice(0, q.limit);
+  const [convs, lastMessages] = await Promise.all([
+    prisma.conversation.findMany({
+      where: { id: { in: rows.map((r) => r.id) } },
+      include: {
+        match: { select: { id: true, title: true, startAt: true, status: true } },
+        team: { select: { id: true, name: true, logoUrl: true } },
+        participants: { include: { user: userSummary } },
+      },
+    }),
+    prisma.message.findMany({ where: { id: { in: rows.map((r) => r.last_id) } }, include: { sender: userSummary } }),
+  ]);
+  const convById = new Map(convs.map((c) => [c.id, c]));
+  const messageById = new Map(lastMessages.map((m) => [m.id, m]));
+
+  const chats = rows.map((r) => {
+    const c = convById.get(r.id)!;
+    const last = messageById.get(r.last_id)!;
+    const other = c.type === 'DIRECT' ? c.participants.find((p) => p.userId !== me)?.user : null;
+    return {
+      id: c.id,
+      type: c.type,
+      title: c.type === 'MATCH' ? c.match?.title : c.type === 'TEAM' ? c.team?.name : other?.fullName,
+      match: c.match,
+      team: c.team,
+      with: other ?? null,
+      lastMessage: { id: last.id, sender: last.sender, body: last.body, createdAt: last.createdAt },
+      unreadCount: r.unread,
+    };
   });
-
-  const blocks = await prisma.blockedUser.findMany({ where: { OR: [{ blockerId: me }, { blockedId: me }] } });
-  const hidden = new Set(blocks.flatMap((b) => [b.blockerId, b.blockedId]).filter((u) => u !== me));
-
-  const rows = await Promise.all(
-    convs
-      .filter((c) => c.type !== 'DIRECT' || !c.participants.some((p) => hidden.has(p.userId)))
-      .map(async (c) => {
-        const mine = c.participants.find((p) => p.userId === me);
-        const visible = { conversationId: c.id, senderId: { notIn: [...hidden] } };
-        const [last, unread] = await Promise.all([
-          prisma.message.findFirst({ where: visible, orderBy: { createdAt: 'desc' }, include: { sender: userSummary } }),
-          prisma.message.count({ where: { ...visible, senderId: { notIn: [...hidden, me] }, ...(mine?.lastReadAt ? { createdAt: { gt: mine.lastReadAt } } : {}) } }),
-        ]);
-        const other = c.type === 'DIRECT' ? c.participants.find((p) => p.userId !== me)?.user : null;
-        return {
-          id: c.id,
-          type: c.type,
-          title: c.type === 'MATCH' ? c.match?.title : c.type === 'TEAM' ? c.team?.name : other?.fullName,
-          match: c.match,
-          team: c.team,
-          with: other ?? null,
-          lastMessage: last ? { id: last.id, sender: last.sender, body: last.body, createdAt: last.createdAt } : null,
-          unreadCount: unread,
-        };
-      }),
-  );
-  rows.sort((a, b) => (b.lastMessage?.createdAt.getTime() ?? 0) - (a.lastMessage?.createdAt.getTime() ?? 0));
-  return { chats: rows, totalUnread: rows.reduce((s, r) => s + r.unreadCount, 0) };
+  return {
+    chats,
+    totalUnread: page[0]?.total_unread ?? 0,
+    nextBefore: page.length > q.limit ? rows[rows.length - 1]!.last_id : null,
+  };
 }

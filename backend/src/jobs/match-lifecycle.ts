@@ -1,120 +1,275 @@
-import { prisma } from '../lib/prisma';
+import type { Prisma } from '@prisma/client';
 import { logger } from '../lib/logger';
+import { prisma } from '../lib/prisma';
 import { notify } from '../modules/notifications/notify';
 
 /*
- * Time-driven match transitions (D5, D16). Designed to be restart-safe and multi-instance-safe:
+ * Time-driven transitions (D5, D16, D1). Designed to be restart-safe and multi-instance-safe:
  *  - no in-memory timers carry state: every run re-derives "what is due" from the database clock;
- *  - rows are claimed atomically (FOR UPDATE SKIP LOCKED) so two instances never double-process;
- *  - the DB state machine re-validates every transition, and handlers enforce the same rules
- *    lazily, so correctness never depends on this job having run on time.
+ *  - each row is claimed atomically (FOR UPDATE SKIP LOCKED), so two instances never double-process it;
+ *  - the DB state machine re-validates every transition, and the handlers enforce the same rules lazily
+ *    (see startMatchIfDue), so correctness never depends on this job having run on time.
+ *
+ * Failure isolation (audit JOB-01):
+ *  - every row is handled in its OWN small transaction: one failing row is logged and skipped, it never blocks the others;
+ *  - a row that failed is quarantined for a while, so a permanently bad row cannot occupy the batch every minute;
+ *  - work is taken in bounded batches (BATCH_SIZE rows, at most MAX_BATCHES per run), so a backlog never becomes one huge
+ *    transaction holding thousands of row locks;
+ *  - every job of a run is isolated from the others: a job that throws is reported and the rest still run.
  */
 
-/** OPEN / FULL / SCHEDULED -> IN_PROGRESS once start_at has passed. (DB trigger expires pending requests.) */
-export async function startDueMatches(): Promise<number> {
-  return prisma.$transaction(async (tx) => {
-    const moved = await tx.$queryRaw<{ id: string; from_status: string }[]>`
-      WITH due AS (
-        SELECT id, status FROM "match"
-         WHERE status IN ('OPEN', 'FULL', 'SCHEDULED') AND start_at <= now()
-         FOR UPDATE SKIP LOCKED)
-      UPDATE "match" m SET status = 'IN_PROGRESS'
-        FROM due WHERE m.id = due.id
-      RETURNING m.id, due.status::text AS from_status`;
-    if (moved.length > 0) {
-      await tx.matchEvent.createMany({
-        data: moved.map((r) => ({ matchId: r.id, fromStatus: r.from_status as never, toStatus: 'IN_PROGRESS', reason: 'auto: start time reached' })),
-      });
+/** Rows fetched per batch. */
+export const BATCH_SIZE = 200;
+/** Batches a single job may drain in one run (a larger backlog continues on the next run). */
+export const MAX_BATCHES = 10;
+const QUARANTINE_MS = 10 * 60_000;
+
+export interface SweepOptions {
+  batchSize?: number;
+  maxBatches?: number;
+}
+
+type Tx = Prisma.TransactionClient;
+
+/** Ids whose processing failed recently, per job: skipped until the cool-down passes. */
+const quarantine = new Map<string, number>();
+const quarantineKey = (job: string, id: string) => `${job}:${id}`;
+function quarantinedIds(job: string): string[] {
+  const now = Date.now();
+  const ids: string[] = [];
+  for (const [key, until] of quarantine) {
+    if (until <= now) quarantine.delete(key);
+    else if (key.startsWith(job + ':')) ids.push(key.slice(job.length + 1));
+  }
+  return ids;
+}
+
+/** Failed rows since the last reset; reported with each run so monitoring can alert on it. */
+let rowFailures = 0;
+
+/**
+ * Handles each id in its own transaction. A failure is logged (with the job and the id), counted, and the id is quarantined;
+ * the remaining ids are still processed. Returns how many ids `handle` reported as done.
+ */
+async function perRow(job: string, ids: string[], handle: (tx: Tx, id: string) => Promise<boolean>): Promise<number> {
+  let done = 0;
+  for (const id of ids) {
+    try {
+      if (await prisma.$transaction((tx) => handle(tx, id))) done++;
+    } catch (err) {
+      rowFailures++;
+      quarantine.set(quarantineKey(job, id), Date.now() + QUARANTINE_MS);
+      logger.error({ err, job, id }, 'sweeper: row failed and was skipped');
     }
-    return moved.length;
-  });
+  }
+  return done;
+}
+
+/** Fetches a batch of due ids, handles them, and repeats while the batches come back full (up to maxBatches). */
+async function drain(job: string, opts: SweepOptions, fetchIds: (limit: number, skip: string[]) => Promise<string[]>, handle: (tx: Tx, id: string) => Promise<boolean>): Promise<number> {
+  const limit = opts.batchSize ?? BATCH_SIZE;
+  const batches = opts.maxBatches ?? MAX_BATCHES;
+  let total = 0;
+  for (let i = 0; i < batches; i++) {
+    const ids = await fetchIds(limit, quarantinedIds(job));
+    if (ids.length === 0) break;
+    total += await perRow(job, ids, handle);
+    if (ids.length < limit) break;
+  }
+  return total;
+}
+
+const NO_UUID: string[] = [];
+const skipList = (skip: string[]) => (skip.length > 0 ? skip : NO_UUID);
+
+/** OPEN / FULL / SCHEDULED -> IN_PROGRESS once start_at has passed. (DB trigger expires pending requests.) */
+export async function startDueMatches(opts: SweepOptions = {}): Promise<number> {
+  return drain(
+    'startDueMatches',
+    opts,
+    async (limit, skip) =>
+      (
+        await prisma.$queryRaw<{ id: string }[]>`
+          SELECT id FROM "match"
+           WHERE status IN ('OPEN', 'FULL', 'SCHEDULED') AND start_at <= now() AND id <> ALL(${skipList(skip)}::uuid[])
+           ORDER BY start_at LIMIT ${limit}`
+      ).map((r) => r.id),
+    async (tx, id) => {
+      // Re-check and claim under a row lock; SKIP LOCKED leaves rows another instance (or a request) is handling.
+      const moved = await tx.$queryRaw<{ from_status: string }[]>`
+        WITH due AS (
+          SELECT id, status FROM "match"
+           WHERE id = ${id}::uuid AND status IN ('OPEN', 'FULL', 'SCHEDULED') AND start_at <= now()
+           FOR UPDATE SKIP LOCKED)
+        UPDATE "match" m SET status = 'IN_PROGRESS' FROM due WHERE m.id = due.id
+        RETURNING due.status::text AS from_status`;
+      if (moved.length === 0) return false;
+      await tx.matchEvent.create({ data: { matchId: id, fromStatus: moved[0]!.from_status as never, toStatus: 'IN_PROGRESS', reason: 'auto: start time reached' } });
+      return true;
+    },
+  );
 }
 
 /** IN_PROGRESS and still unconfirmed 48h after the scheduled end -> CLOSED_UNCONFIRMED; tell the organizer. */
-export async function closeUnconfirmedMatches(): Promise<number> {
-  return prisma.$transaction(async (tx) => {
-    const closed = await tx.$queryRaw<{ id: string; organizer_id: string; title: string }[]>`
-      WITH due AS (
-        SELECT id FROM "match"
-         WHERE status = 'IN_PROGRESS' AND end_at + fym_unconfirmed_grace() <= now()
-         FOR UPDATE SKIP LOCKED)
-      UPDATE "match" m SET status = 'CLOSED_UNCONFIRMED'
-        FROM due WHERE m.id = due.id
-      RETURNING m.id, m.organizer_id, m.title`;
-    for (const m of closed) {
-      await tx.matchEvent.create({ data: { matchId: m.id, fromStatus: 'IN_PROGRESS', toStatus: 'CLOSED_UNCONFIRMED', reason: 'auto: not confirmed within 48h' } });
-      await notify(tx, [m.organizer_id], 'MATCH_CLOSED_UNCONFIRMED', { matchId: m.id, title: m.title }, { type: 'match', id: m.id });
-    }
-    return closed.length;
-  });
+export async function closeUnconfirmedMatches(opts: SweepOptions = {}): Promise<number> {
+  return drain(
+    'closeUnconfirmedMatches',
+    opts,
+    async (limit, skip) =>
+      (
+        await prisma.$queryRaw<{ id: string }[]>`
+          SELECT id FROM "match"
+           WHERE status = 'IN_PROGRESS' AND end_at + fym_unconfirmed_grace() <= now() AND id <> ALL(${skipList(skip)}::uuid[])
+           ORDER BY end_at LIMIT ${limit}`
+      ).map((r) => r.id),
+    async (tx, id) => {
+      const closed = await tx.$queryRaw<{ organizer_id: string; title: string }[]>`
+        WITH due AS (
+          SELECT id FROM "match"
+           WHERE id = ${id}::uuid AND status = 'IN_PROGRESS' AND end_at + fym_unconfirmed_grace() <= now()
+           FOR UPDATE SKIP LOCKED)
+        UPDATE "match" m SET status = 'CLOSED_UNCONFIRMED' FROM due WHERE m.id = due.id
+        RETURNING m.organizer_id, m.title`;
+      if (closed.length === 0) return false;
+      await tx.matchEvent.create({ data: { matchId: id, fromStatus: 'IN_PROGRESS', toStatus: 'CLOSED_UNCONFIRMED', reason: 'auto: not confirmed within 48h' } });
+      await notify(tx, [closed[0]!.organizer_id], 'MATCH_CLOSED_UNCONFIRMED', { matchId: id, title: closed[0]!.title }, { type: 'match', id });
+      return true;
+    },
+  );
 }
 
 /** PENDING booking requests nobody answered within the 2h hold -> EXPIRED (slot released). The DB also expires stale holds lazily, so this is a tidy-up, not a correctness requirement. */
-export async function expireStaleBookings(): Promise<number> {
-  return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRaw<{ id: string; created_by_id: string; start_at: Date }[]>`
-      WITH due AS (
-        SELECT id FROM booking WHERE status = 'PENDING' AND hold_expires_at <= now() FOR UPDATE SKIP LOCKED)
-      UPDATE booking b SET status = 'EXPIRED' FROM due WHERE b.id = due.id
-      RETURNING b.id, b.created_by_id, b.start_at`;
-    for (const b of rows) {
-      await tx.bookingEvent.create({ data: { bookingId: b.id, fromStatus: 'PENDING', toStatus: 'EXPIRED', reason: 'auto: not answered within the hold' } });
-      await notify(tx, [b.created_by_id], 'BOOKING_EXPIRED', { bookingId: b.id, startAt: b.start_at.toISOString() }, { type: 'booking', id: b.id });
-    }
-    return rows.length;
-  });
+export async function expireStaleBookings(opts: SweepOptions = {}): Promise<number> {
+  return drain(
+    'expireStaleBookings',
+    opts,
+    async (limit, skip) =>
+      (
+        await prisma.$queryRaw<{ id: string }[]>`
+          SELECT id FROM booking
+           WHERE status = 'PENDING' AND hold_expires_at <= now() AND id <> ALL(${skipList(skip)}::uuid[])
+           ORDER BY hold_expires_at LIMIT ${limit}`
+      ).map((r) => r.id),
+    async (tx, id) => {
+      const rows = await tx.$queryRaw<{ created_by_id: string; start_at: Date }[]>`
+        WITH due AS (SELECT id FROM booking WHERE id = ${id}::uuid AND status = 'PENDING' AND hold_expires_at <= now() FOR UPDATE SKIP LOCKED)
+        UPDATE booking b SET status = 'EXPIRED' FROM due WHERE b.id = due.id
+        RETURNING b.created_by_id, b.start_at`;
+      if (rows.length === 0) return false;
+      await tx.bookingEvent.create({ data: { bookingId: id, fromStatus: 'PENDING', toStatus: 'EXPIRED', reason: 'auto: not answered within the hold' } });
+      await notify(tx, [rows[0]!.created_by_id], 'BOOKING_EXPIRED', { bookingId: id, startAt: rows[0]!.start_at.toISOString() }, { type: 'booking', id });
+      return true;
+    },
+  );
 }
 
-/** CONFIRMED bookings whose time has passed -> COMPLETED. */
-export async function completeFinishedBookings(): Promise<number> {
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
-    WITH due AS (SELECT id FROM booking WHERE status = 'CONFIRMED' AND end_at <= now() FOR UPDATE SKIP LOCKED)
-    UPDATE booking b SET status = 'COMPLETED' FROM due WHERE b.id = due.id RETURNING b.id`;
-  return rows.length;
+/** CONFIRMED bookings whose time has passed -> COMPLETED. (No side effects, so a bounded batch per statement is enough.) */
+export async function completeFinishedBookings(opts: SweepOptions = {}): Promise<number> {
+  const limit = opts.batchSize ?? BATCH_SIZE;
+  let total = 0;
+  for (let i = 0; i < (opts.maxBatches ?? MAX_BATCHES); i++) {
+    const rows = await prisma.$queryRaw<{ id: string }[]>`
+      WITH due AS (SELECT id FROM booking WHERE status = 'CONFIRMED' AND end_at <= now() ORDER BY end_at LIMIT ${limit} FOR UPDATE SKIP LOCKED)
+      UPDATE booking b SET status = 'COMPLETED' FROM due WHERE b.id = due.id RETURNING b.id`;
+    total += rows.length;
+    if (rows.length < limit) break;
+  }
+  return total;
 }
 
 /** Unanswered team challenges and team invitations past their deadline -> EXPIRED. Handlers also check lazily, so this is a tidy-up. */
-export async function expireStaleTeamOffers(): Promise<number> {
-  const challenges = await prisma.$queryRaw<{ id: string; challenger_team_id: string }[]>`
-    WITH due AS (SELECT id FROM team_challenge WHERE status = 'PENDING' AND expires_at <= now() FOR UPDATE SKIP LOCKED)
-    UPDATE team_challenge c SET status = 'EXPIRED' FROM due WHERE c.id = due.id RETURNING c.id, c.challenger_team_id`;
-  for (const c of challenges) {
-    const staff = await prisma.teamMember.findMany({ where: { teamId: c.challenger_team_id, role: { in: ['CAPTAIN', 'VICE_CAPTAIN'] } }, select: { userId: true } });
-    await notify(prisma, staff.map((s) => s.userId), 'CHALLENGE_CANCELLED', { challengeId: c.id, expired: true }, { type: 'challenge', id: c.id });
-  }
-  const invites = await prisma.teamInvitation.updateMany({ where: { status: 'PENDING', expiresAt: { lte: new Date() } }, data: { status: 'EXPIRED' } });
-  return challenges.length + invites.count;
+export async function expireStaleTeamOffers(opts: SweepOptions = {}): Promise<number> {
+  const challenges = await drain(
+    'expireStaleTeamOffers',
+    opts,
+    async (limit, skip) =>
+      (
+        await prisma.$queryRaw<{ id: string }[]>`
+          SELECT id FROM team_challenge
+           WHERE status = 'PENDING' AND expires_at <= now() AND id <> ALL(${skipList(skip)}::uuid[])
+           ORDER BY expires_at LIMIT ${limit}`
+      ).map((r) => r.id),
+    async (tx, id) => {
+      const rows = await tx.$queryRaw<{ challenger_team_id: string }[]>`
+        WITH due AS (SELECT id FROM team_challenge WHERE id = ${id}::uuid AND status = 'PENDING' AND expires_at <= now() FOR UPDATE SKIP LOCKED)
+        UPDATE team_challenge c SET status = 'EXPIRED' FROM due WHERE c.id = due.id RETURNING c.challenger_team_id`;
+      if (rows.length === 0) return false;
+      const staff = await tx.teamMember.findMany({ where: { teamId: rows[0]!.challenger_team_id, role: { in: ['CAPTAIN', 'VICE_CAPTAIN'] } }, select: { userId: true } });
+      await notify(tx, staff.map((s) => s.userId), 'CHALLENGE_CANCELLED', { challengeId: id, expired: true }, { type: 'challenge', id });
+      return true;
+    },
+  );
+  const invites = await prisma.$executeRaw`
+    UPDATE team_invitation SET status = 'EXPIRED'
+     WHERE id IN (SELECT id FROM team_invitation WHERE status = 'PENDING' AND expires_at <= now() LIMIT ${opts.batchSize ?? BATCH_SIZE})`;
+  return challenges + invites;
 }
 
-/** Runs every sweeper once, in order; each is idempotent, so running them twice or on two instances is safe. */
-export async function runLifecycleJobs(): Promise<{ started: number; closed: number; expired: number; completed: number; offers: number }> {
-  const started = await startDueMatches();
-  const closed = await closeUnconfirmedMatches();
-  const expired = await expireStaleBookings();
-  const completed = await completeFinishedBookings();
-  const offers = await expireStaleTeamOffers();
-  return { started, closed, expired, completed, offers };
+export interface LifecycleResult {
+  started: number;
+  closed: number;
+  expired: number;
+  completed: number;
+  offers: number;
+  /** Names of jobs that threw (the others still ran). */
+  failedJobs: string[];
+  /** Rows that failed and were skipped (quarantined) during this run. */
+  failedRows: number;
 }
 
-/** Runs the sweepers every minute without overlapping runs; returns a function that stops the schedule (used on shutdown). */
-export function scheduleLifecycleJobs(intervalMs = 60_000): () => void {
-  let running = false;
-  const tick = async () => {
-    if (running) return; // never overlap with a slow previous run
-    running = true;
+/** Runs the given jobs one after another; a job that throws is reported in `failed` and does NOT stop the rest. */
+export async function runIsolated<K extends string>(jobs: Record<K, () => Promise<number>>): Promise<{ counts: Record<K, number>; failed: K[] }> {
+  const counts = {} as Record<K, number>;
+  const failed: K[] = [];
+  for (const name of Object.keys(jobs) as K[]) {
     try {
-      const r = await runLifecycleJobs();
-      if (r.started || r.closed || r.expired || r.completed || r.offers) logger.info(r, 'match lifecycle job');
+      counts[name] = await jobs[name]();
     } catch (err) {
-      logger.error({ err }, 'match lifecycle job failed');
-    } finally {
-      running = false;
+      counts[name] = 0;
+      failed.push(name);
+      logger.error({ err, job: name }, 'sweeper job failed; the other jobs still run');
     }
+  }
+  return { counts, failed };
+}
+
+/** Runs every sweeper once, in order, each isolated from the others; each is idempotent, so running them twice or on two instances is safe. */
+export async function runLifecycleJobs(): Promise<LifecycleResult> {
+  rowFailures = 0;
+  const { counts, failed } = await runIsolated({
+    started: () => startDueMatches(),
+    closed: () => closeUnconfirmedMatches(),
+    expired: () => expireStaleBookings(),
+    completed: () => completeFinishedBookings(),
+    offers: () => expireStaleTeamOffers(),
+  });
+  return { ...counts, failedJobs: failed, failedRows: rowFailures };
+}
+
+/**
+ * Runs the sweepers every minute without overlapping runs. Returns an async `stop` function: it cancels the schedule and
+ * resolves when the run in progress (if any) has finished, so shutdown can wait for in-flight work.
+ */
+export function scheduleLifecycleJobs(intervalMs = 60_000): () => Promise<void> {
+  let running: Promise<void> | null = null;
+  const tick = () => {
+    if (running) return; // never overlap with a slow previous run
+    running = (async () => {
+      try {
+        const r = await runLifecycleJobs();
+        if (r.started || r.closed || r.expired || r.completed || r.offers || r.failedJobs.length > 0 || r.failedRows > 0) logger.info(r, 'match lifecycle job');
+      } catch (err) {
+        logger.error({ err }, 'match lifecycle job failed');
+      }
+    })().finally(() => {
+      running = null;
+    });
   };
   const first = setTimeout(tick, 5_000);
   const timer = setInterval(tick, intervalMs);
-  return () => {
+  return async () => {
     clearTimeout(first);
     clearInterval(timer);
+    await running;
   };
 }

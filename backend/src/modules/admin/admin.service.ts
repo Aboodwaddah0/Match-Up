@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
+import { disconnectUser } from '../../lib/realtime';
 import { notify } from '../notifications/notify';
 import { statsFor } from '../players/players.service';
 import type { listUsersSchema, listVenuesSchema } from './admin.schemas';
@@ -56,6 +57,7 @@ export async function suspendUser(adminId: string, id: string): Promise<void> {
     await tx.user.update({ where: { id }, data: { status: 'SUSPENDED' } });
     await tx.refreshToken.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
   });
+  disconnectUser(id); // a suspended user must stop receiving live chat immediately, not at the next reconnect
 }
 
 /** Lifts a suspension. Only a SUSPENDED account can be reactivated (409 otherwise). */

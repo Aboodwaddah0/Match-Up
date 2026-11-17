@@ -5,6 +5,7 @@ import { randomToken, sha256 } from '../../lib/crypto';
 import { AppError } from '../../lib/errors';
 import { accessTokenTtlSeconds, signAccessToken } from '../../lib/jwt';
 import { sendEmail } from '../../lib/mailer';
+import { disconnectUser } from '../../lib/realtime';
 import { burnPasswordCheck, hashPassword, verifyPassword } from '../../lib/password';
 import { prisma } from '../../lib/prisma';
 import { toPublicUser } from '../users/users.service';
@@ -173,6 +174,7 @@ export async function logout(rawToken: string): Promise<void> {
 /** Revokes every refresh token of the user (all devices). */
 export async function logoutAll(userId: string): Promise<void> {
   await prisma.$transaction((tx) => revokeUserSessions(tx, userId));
+  disconnectUser(userId); // live chat sockets must not outlive the sessions (clients reconnect only after logging in again)
 }
 
 /** Always succeeds from the caller's point of view, so it cannot be used to discover accounts. */
@@ -189,13 +191,15 @@ export async function forgotPassword(email: string): Promise<void> {
  */
 export async function resetPassword(rawToken: string, newPassword: string): Promise<void> {
   const passwordHash = await hashPassword(newPassword);
-  await prisma.$transaction(async (tx) => {
-    const userId = await consumeUserToken(tx, rawToken, 'PASSWORD_RESET');
+  const userId = await prisma.$transaction(async (tx) => {
+    const id = await consumeUserToken(tx, rawToken, 'PASSWORD_RESET');
     // Following a link sent to the inbox also proves the address is theirs.
-    await tx.user.update({ where: { id: userId }, data: { passwordHash } });
-    await tx.user.updateMany({ where: { id: userId, emailVerifiedAt: null }, data: { emailVerifiedAt: new Date() } });
-    await revokeUserSessions(tx, userId); // every device must log in again
+    await tx.user.update({ where: { id }, data: { passwordHash } });
+    await tx.user.updateMany({ where: { id, emailVerifiedAt: null }, data: { emailVerifiedAt: new Date() } });
+    await revokeUserSessions(tx, id); // every device must log in again
+    return id;
   });
+  disconnectUser(userId);
 }
 
 /** Changes the password after checking the current one; revokes all other sessions and returns a fresh session for this device. */
@@ -205,9 +209,11 @@ export async function changePassword(userId: string, currentPassword: string, ne
     throw new AppError(400, 'WRONG_PASSWORD', 'Current password is incorrect');
   }
   const passwordHash = await hashPassword(newPassword);
-  return prisma.$transaction(async (tx) => {
+  const session = await prisma.$transaction(async (tx) => {
     await tx.user.update({ where: { id: userId }, data: { passwordHash } });
     await revokeUserSessions(tx, userId);
     return startSession(tx, userId); // this device continues with a fresh session
   });
+  disconnectUser(userId); // sockets opened with the old session end; this device reconnects with its new access token
+  return session;
 }

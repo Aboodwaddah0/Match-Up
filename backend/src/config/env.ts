@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
 import { isLinkTemplate } from '../lib/links';
+import { productionProblems } from './production-checks';
 
 dotenv.config({ quiet: true });
 
@@ -25,6 +26,8 @@ const schema = z.object({
   MAIL_FROM: z.string().trim().min(3).default('Find Your Match <no-reply@localhost>'),
   // Background sweepers (match start / close-unconfirmed). Safe to run on several instances.
   JOBS_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  // How long a shutdown may take before remaining connections are cut. Keep it BELOW the orchestrator's kill timeout (Docker: 10 s).
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(500).max(120_000).default(8000),
   // Set to 1 when running behind one reverse proxy so rate limiting sees the real client IP.
   TRUST_PROXY: z.coerce.number().int().min(0).default(0),
 });
@@ -34,6 +37,12 @@ const parsed = schema.safeParse(process.env);
 if (!parsed.success) {
   const problems = parsed.error.issues.map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`);
   console.error(`Invalid environment configuration:\n${problems.join('\n')}`);
+  process.exit(1);
+}
+
+const unsafe = productionProblems(parsed.data);
+if (unsafe.length > 0) {
+  console.error(`Refusing to start in production with an unsafe configuration:\n${unsafe.map((p) => `  - ${p}`).join('\n')}`);
   process.exit(1);
 }
 

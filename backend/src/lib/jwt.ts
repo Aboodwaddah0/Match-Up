@@ -19,13 +19,19 @@ export function signAccessToken(userId: string): Promise<string> {
     .sign(secret);
 }
 
-/** Throws if the signature, issuer, audience or expiry is wrong. Returns the user id. */
-export async function verifyAccessToken(token: string): Promise<string> {
+/** Throws if the signature, issuer, audience or expiry is wrong. Returns the user id and the expiry (seconds since the epoch). */
+export async function verifyAccessTokenClaims(token: string): Promise<{ userId: string; expiresAt: number }> {
   const { payload } = await jwtVerify(token, secret, {
     algorithms: ['HS256'],
     issuer: ISSUER,
     audience: AUDIENCE,
   });
   if (!payload.sub) throw new Error('token has no subject');
-  return payload.sub;
+  if (typeof payload.exp !== 'number') throw new Error('token has no expiry');
+  return { userId: payload.sub, expiresAt: payload.exp };
+}
+
+/** Throws if the signature, issuer, audience or expiry is wrong. Returns the user id. */
+export async function verifyAccessToken(token: string): Promise<string> {
+  return (await verifyAccessTokenClaims(token)).userId;
 }

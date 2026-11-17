@@ -4,7 +4,7 @@ import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { formatHm, timeColumnToMinutes } from '../../lib/time';
 import type { Actor } from '../../types/actor';
-import { DEFAULT_PERMISSIONS, requireVenuePermission, venueRights } from './venues.access';
+import { DEFAULT_PERMISSIONS, requireVenuePermission, venueRights, type VenueRights } from './venues.access';
 import type { createVenueSchema, staffSchema, updateVenueSchema, venueSearchSchema } from './venues.schemas';
 
 const venueInclude = {
@@ -149,14 +149,39 @@ export async function searchVenues(q: z.infer<typeof venueSearchSchema>) {
 
 // ───────────────────────── staff (per-venue permissions, D2) ─────────────────────────
 
-/** Adds (or updates) a staff member with a role and permissions; defaults come from the role. The owner cannot be added as staff. */
+/**
+ * Rules that stop staff-management from becoming a way to escalate (audit AUTHZ-01). They apply to staff who are NOT the
+ * owner (or an admin); the owner may do anything:
+ *  1. nobody edits their own access;
+ *  2. only the owner grants MANAGE_STAFF (it is the permission to hand out permissions);
+ *  3. delegation never exceeds what you hold yourself: you cannot give a permission you do not have;
+ *  4. you cannot change or remove someone who holds MANAGE_STAFF, or a permission you do not hold (they are your equal or senior).
+ * Before this, a staff member holding only MANAGE_STAFF could give themselves every permission and strip other managers.
+ */
+async function assertCanDelegate(rights: VenueRights, actor: Actor, venueId: string, targetUserId: string, granted: VenuePermission[] | null) {
+  if (rights.isOwner || actor.role === 'ADMIN') return;
+  if (granted !== null) {
+    if (targetUserId === actor.userId) throw new AppError(403, 'CANNOT_EDIT_OWN_ACCESS', 'You cannot change your own access to this venue');
+    if (granted.includes('MANAGE_STAFF')) throw new AppError(403, 'ONLY_OWNER_GRANTS_STAFF_MANAGEMENT', 'Only the venue owner can give the permission to manage staff');
+    const unheld = granted.filter((p) => !rights.can(p));
+    if (unheld.length > 0) throw new AppError(403, 'CANNOT_GRANT_UNHELD_PERMISSION', `You cannot give permissions you do not have: ${unheld.join(', ')}`);
+  }
+  const existing = await prisma.venueStaff.findUnique({ where: { venueId_userId: { venueId, userId: targetUserId } } });
+  if (existing && targetUserId !== actor.userId && (existing.permissions.includes('MANAGE_STAFF') || existing.permissions.some((p) => !rights.can(p)))) {
+    throw new AppError(403, 'CANNOT_MANAGE_SENIOR_STAFF', 'You cannot change or remove someone who has permissions you do not have');
+  }
+}
+
+/** Adds (or updates) a staff member with a role and permissions; defaults come from the role. The owner cannot be added as staff. See assertCanDelegate for who may do what. */
 export async function addStaff(actor: Actor, venueId: string, input: z.infer<typeof staffSchema>) {
-  const { venue } = await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
+  const rights = await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
+  const { venue } = rights;
   if (input.userId === venue.ownerId) throw new AppError(400, 'INVALID_STAFF', 'The owner already has full access');
   const user = await prisma.user.findUnique({ where: { id: input.userId }, select: { id: true, status: true } });
   if (!user || user.status !== 'ACTIVE') throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
 
   const permissions = input.permissions ?? DEFAULT_PERMISSIONS[input.role];
+  await assertCanDelegate(rights, actor, venueId, input.userId, permissions);
   const row = await prisma.venueStaff.upsert({
     where: { venueId_userId: { venueId, userId: input.userId } },
     create: { venueId, userId: input.userId, role: input.role, permissions },
@@ -172,9 +197,10 @@ export async function listStaff(actor: Actor, venueId: string) {
   return { staff: rows.map((r) => ({ userId: r.userId, fullName: r.user.fullName, avatarUrl: r.user.avatarUrl, role: r.role, permissions: r.permissions })) };
 }
 
-/** Removes a staff member from this venue only (permissions are never global). */
+/** Removes a staff member from this venue only (permissions are never global). A staff member may always remove THEMSELVES; removing others follows assertCanDelegate. */
 export async function removeStaff(actor: Actor, venueId: string, userId: string): Promise<void> {
-  await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
+  const rights = await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
+  await assertCanDelegate(rights, actor, venueId, userId, null);
   const res = await prisma.venueStaff.deleteMany({ where: { venueId, userId } });
   if (res.count === 0) throw new AppError(404, 'STAFF_NOT_FOUND', 'This user is not staff at the venue');
 }

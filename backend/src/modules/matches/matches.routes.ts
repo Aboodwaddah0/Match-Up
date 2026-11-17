@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
+import { createMatchLimiter, invitationLimiter, joinRequestLimiter } from '../../middleware/rate-limit';
 import { validate } from '../../middleware/validate';
 import * as matches from './matches.controller';
 import {
@@ -26,14 +27,14 @@ matchesRouter.get('/', validate({ query: searchSchema }), matches.search);
 matchesRouter.get('/mine', validate({ query: mineSchema }), matches.mine);
 
 // ── match CRUD and lifecycle ──
-matchesRouter.post('/', requireVerifiedEmail, validate({ body: createMatchSchema }), matches.create);
+matchesRouter.post('/', requireVerifiedEmail, createMatchLimiter, validate({ body: createMatchSchema }), matches.create);
 matchesRouter.get('/:matchId', validate({ params: matchIdParams }), matches.get);
 matchesRouter.patch('/:matchId', validate({ params: matchIdParams, body: updateMatchSchema }), matches.update);
 matchesRouter.post('/:matchId/cancel', validate({ params: matchIdParams, body: cancelSchema, optionalBody: true }), matches.cancel);
 matchesRouter.post('/:matchId/complete', validate({ params: matchIdParams }), matches.complete);
 
 // ── join requests ──
-matchesRouter.post('/:matchId/requests', requireVerifiedEmail, validate({ params: matchIdParams, body: createRequestSchema, optionalBody: true }), participation.createRequest);
+matchesRouter.post('/:matchId/requests', requireVerifiedEmail, joinRequestLimiter, validate({ params: matchIdParams, body: createRequestSchema, optionalBody: true }), participation.createRequest);
 matchesRouter.delete('/:matchId/requests/me', validate({ params: matchIdParams }), participation.withdrawRequest);
 matchesRouter.get('/:matchId/requests', validate({ params: matchIdParams }), participation.listRequests);
 matchesRouter.post('/:matchId/requests/:requestId/accept', validate({ params: requestParams }), participation.acceptRequest);
@@ -46,4 +47,4 @@ matchesRouter.delete('/:matchId/participants/:userId', validate({ params: partic
 matchesRouter.patch('/:matchId/participants/:userId/attendance', validate({ params: participantParams, body: attendanceSchema }), participation.setAttendance);
 
 // ── invitations ──
-matchesRouter.post('/:matchId/invitations', requireVerifiedEmail, validate({ params: matchIdParams, body: inviteSchema }), participation.invite);
+matchesRouter.post('/:matchId/invitations', requireVerifiedEmail, invitationLimiter, validate({ params: matchIdParams, body: inviteSchema }), participation.invite);

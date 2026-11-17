@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
+import { bookingLimiter } from '../../middleware/rate-limit';
 import { validate } from '../../middleware/validate';
 import * as bookings from './bookings.controller';
 import {
@@ -16,8 +17,8 @@ import {
 export const bookingsRouter = Router();
 bookingsRouter.use(authenticate);
 
-bookingsRouter.post('/', requireVerifiedEmail, validate({ body: createBookingSchema }), bookings.create);
-bookingsRouter.post('/external', requireVerifiedEmail, validate({ body: externalBookingSchema }), bookings.createExternal);
+bookingsRouter.post('/', requireVerifiedEmail, bookingLimiter, validate({ body: createBookingSchema }), bookings.create);
+bookingsRouter.post('/external', requireVerifiedEmail, bookingLimiter, validate({ body: externalBookingSchema }), bookings.createExternal);
 bookingsRouter.get('/mine', validate({ query: myBookingsSchema }), bookings.mine);
 bookingsRouter.get('/:bookingId', validate({ params: bookingIdParams }), bookings.get);
 bookingsRouter.post('/:bookingId/cancel', validate({ params: bookingIdParams, body: reasonSchema, optionalBody: true }), bookings.cancel);

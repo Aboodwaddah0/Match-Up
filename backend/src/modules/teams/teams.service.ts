@@ -156,6 +156,11 @@ export async function leaveTeam(actor: Actor, teamId: string): Promise<void> {
 
 /** A player who leaves (or is removed from) a team drops out of that team's rosters for matches that have not started. */
 async function dropFromUpcomingRosters(tx: Prisma.TransactionClient, teamId: string, userId: string, status: 'LEFT' | 'REMOVED') {
+  // Several matches can be affected: lock them first, in ascending id order, so this cannot deadlock with a cancel or another roster change.
+  await tx.$queryRaw`
+    SELECT m.id FROM "match" m JOIN match_participant p ON p.match_id = m.id JOIN match_team t ON t.id = p.match_team_id
+     WHERE p.user_id = ${userId}::uuid AND p.status = 'CONFIRMED' AND t.team_id = ${teamId}::uuid AND m.status = 'SCHEDULED' AND m.start_at > now()
+     ORDER BY m.id FOR NO KEY UPDATE OF m`;
   await tx.matchParticipant.updateMany({
     where: { userId, status: 'CONFIRMED', matchTeam: { teamId }, match: { status: 'SCHEDULED', startAt: { gt: new Date() } } },
     data: { status, leftAt: new Date() }, // the DB trigger stamps left_at and the late-cancellation flag per row

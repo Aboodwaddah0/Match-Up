@@ -1,11 +1,11 @@
 import type { Request, Response } from 'express';
 import { actorOf } from '../../middleware/authenticate';
 import { valid } from '../../middleware/validate';
-import { directChatSchema, idParams, listMessagesSchema, sendMessageSchema } from './chat.schemas';
+import { directChatSchema, idParams, listChatsSchema, listMessagesSchema, sendMessageSchema } from './chat.schemas';
 import * as chat from './chat.service';
 
 export const inbox = async (req: Request, res: Response) => {
-  res.json(await chat.listChats(actorOf(req)));
+  res.json(await chat.listChats(actorOf(req), valid(req, 'query', listChatsSchema)));
 };
 
 // Opening returns the conversation id (get-or-create). Non-members get 404.
