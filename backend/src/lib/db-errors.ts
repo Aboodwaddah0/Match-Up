@@ -1,4 +1,5 @@
 import { AppError } from './errors';
+import { logger } from './logger';
 
 /**
  * The database is the last line of defence (triggers / constraints raise FYM_* errors and standard
@@ -71,6 +72,8 @@ export function toAppError(err: unknown): AppError | null {
     return new AppError(409, 'CONFLICT', 'This resource already exists');
   }
 
+  if (isDeadlock(err)) return new AppError(409, 'CONCURRENT_CONFLICT', 'Another request changed this at the same time; please try again');
+
   const fym = text.match(/FYM_[A-Z_]+/)?.[0];
   if (fym && FYM[fym]) {
     const [status, code, message] = FYM[fym];
@@ -99,4 +102,34 @@ export function toAppError(err: unknown): AppError | null {
     return new AppError(400, 'INVALID_CAPACITY', 'Capacity must be between 1 and the total players of the format');
   }
   return null;
+}
+
+/**
+ * Postgres chose this transaction as the victim of a deadlock (SQLSTATE 40P01).
+ * Matches the structured code only (Prisma's P2034, or the connector's `code: "40P01"`), never free text, because
+ * Prisma error messages can echo user-supplied values and an unrelated error must keep its own handling.
+ */
+export function isDeadlock(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as { code?: unknown; meta?: { code?: unknown } };
+  return e.code === 'P2034' || e.meta?.code === '40P01' || /PostgresError \{ code: "40P01"/.test(err.message);
+}
+
+/**
+ * Re-runs a whole transaction when Postgres aborts it as a deadlock victim.
+ * Two transactions that confirm the same player into different (overlapping) matches each insert a
+ * participant row and then wait on the other's uncommitted row inside the overlap exclusion constraint;
+ * Postgres resolves that by aborting one of them. The retry runs after the winner committed, so it ends in the
+ * normal clean SCHEDULE_CONFLICT instead of a 500. `fn` must be safe to repeat (it is a single transaction).
+ */
+export async function withDeadlockRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isDeadlock(err) || i >= attempts) throw err;
+      logger.warn({ attempt: i }, 'deadlock victim: retrying transaction');
+      await new Promise((r) => setTimeout(r, 20 * i + Math.random() * 30)); // small jitter so the two sides do not collide again
+    }
+  }
 }

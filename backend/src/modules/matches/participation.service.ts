@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
+import { withDeadlockRetry } from '../../lib/db-errors';
 import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
 import type { attendanceSchema } from './matches.schemas';
@@ -82,7 +83,8 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
   if (!request) throw new AppError(404, 'REQUEST_NOT_FOUND', 'Request not found');
   if (request.status !== 'PENDING') throw new AppError(409, 'REQUEST_ALREADY_DECIDED', 'This request was already decided');
 
-  await prisma.$transaction(async (tx) => {
+  // Confirming a player can race with another match confirming the same player: retry if we lose a deadlock.
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
     await tx.matchRequest.update({
       where: { id: requestId },
       data: { status: decision === 'accept' ? 'ACCEPTED' : 'REJECTED', decidedById: actor.userId },
@@ -100,7 +102,7 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
     }
     await notify(tx, [request.userId], decision === 'accept' ? 'MATCH_REQUEST_ACCEPTED' : 'MATCH_REQUEST_REJECTED',
       { matchId, title: m.title }, { type: 'match', id: matchId });
-  });
+  }));
 
   return { match: await getMatch(actor, matchId) };
 }

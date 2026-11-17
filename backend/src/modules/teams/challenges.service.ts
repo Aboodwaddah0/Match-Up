@@ -1,6 +1,7 @@
 import type { Prisma } from '@prisma/client';
 import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
+import { withDeadlockRetry } from '../../lib/db-errors';
 import { prisma } from '../../lib/prisma';
 import { getMatch, type Actor } from '../matches/matches.service';
 import { notify } from '../notifications/notify';
@@ -188,14 +189,14 @@ export async function addToRoster(actor: Actor, teamId: string, matchId: string,
   const side = await loadSide(teamId, matchId);
   if (side.match.status !== 'SCHEDULED') throw new AppError(409, 'INVALID_STATE', 'The roster can only change before the match starts');
 
-  await prisma.$transaction(async (tx) => {
+  await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
     // One row per (match, user): a player who left or was removed is re-activated, not duplicated.
     const existing = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId } } });
     if (existing?.status === 'CONFIRMED') throw new AppError(409, 'ALREADY_PARTICIPANT', 'This player is already on a roster for this match');
     if (existing) await tx.matchParticipant.update({ where: { id: existing.id }, data: { status: 'CONFIRMED', matchTeamId: side.id } });
     else await tx.matchParticipant.create({ data: { matchId, userId, matchTeamId: side.id } });
     await notify(tx, [userId], 'TEAM_ROSTER_ADDED', { matchId, teamId, title: side.match.title, startAt: side.match.startAt.toISOString() }, { type: 'match', id: matchId });
-  });
+  }));
   return getRoster(actor, teamId, matchId);
 }
 
