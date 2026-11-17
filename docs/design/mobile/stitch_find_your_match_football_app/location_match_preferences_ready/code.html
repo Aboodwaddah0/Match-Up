@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+
+<html lang="en"><head><meta charset="utf-8"/><meta content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" name="viewport"/><meta content="mobile_blank" name="shell-type"/><link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/><link href="https://fonts.googleapis.com" rel="preconnect"/><link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;family=Manrope:wght@600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/><style>@layer base{html,body{width:100vw;margin:0;padding:0;}body{overscroll-behavior:none;}.pb-safe{padding-bottom:env(safe-area-inset-bottom,0px);}.pt-safe{padding-top:env(safe-area-inset-top,0px);}main>:first-child{margin-top:0!important;}main>:last-child{margin-bottom:0!important;}}::-webkit-scrollbar{display:none;}</style><script src="https://cdn.tailwindcss.com"></script><script id="tailwind-config">tailwind.config = { darkMode: "class", theme: { extend: { "colors": { "on-primary-fixed": "#002114", "surface": "#effdf3", "tertiary-container": "#003374", "tertiary": "#001f4b", "inverse-surface": "#27332d", "on-secondary-container": "#00743f", "background": "#effdf3", "secondary-fixed": "#72fda6", "surface-container": "#e3f1e7", "error": "#ba1a1a", "outline": "#717973", "on-tertiary-fixed-variant": "#004395", "surface-container-low": "#e9f7ed", "on-surface": "#121e18", "surface-tint": "#3d6752", "inverse-primary": "#a4d1b7", "on-primary-container": "#7da890", "outline-variant": "#c1c8c2", "surface-container-high": "#ddece2", "on-primary-fixed-variant": "#254f3b", "on-tertiary-container": "#6a9dff", "primary-fixed-dim": "#a4d1b7", "surface-container-lowest": "#ffffff", "primary": "#002618", "on-error-container": "#93000a", "surface-container-highest": "#d8e6dc", "secondary-container": "#72fda6", "on-secondary": "#ffffff", "secondary": "#006d3b", "on-primary": "#ffffff", "on-tertiary": "#ffffff", "primary-container": "#123d2b", "on-surface-variant": "#414943", "on-error": "#ffffff", "on-secondary-fixed-variant": "#00522b", "on-background": "#121e18", "on-secondary-fixed": "#00210e", "surface-dim": "#cfddd4", "on-tertiary-fixed": "#001a42", "secondary-fixed-dim": "#52df8d", "error-container": "#ffdad6", "tertiary-fixed-dim": "#adc6ff", "tertiary-fixed": "#d8e2ff", "surface-bright": "#effdf3", "inverse-on-surface": "#e6f4ea", "primary-fixed": "#bfedd3", "surface-variant": "#d8e6dc" }, "borderRadius": { "DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px" }, "spacing": { "margin-mobile": "1rem", "gutter-mobile": "0.75rem", "space-xl": "2rem", "space-sm": "0.5rem", "space-xs": "0.25rem", "margin": "1.25rem", "space-lg": "1.5rem", "space-md": "1rem", "gutter": "1rem" }, "fontFamily": { "headline-lg": ["Manrope"], "headline-md": ["Manrope"], "label-lg": ["Inter"], "label-sm": ["Inter"], "body-md": ["Inter"], "stats-display": ["Manrope"], "headline-xl-mobile": ["Manrope"], "body-sm": ["Inter"], "label-md": ["Inter"], "headline-xl": ["Manrope"], "headline-sm": ["Manrope"], "body-lg": ["Inter"] }, "fontSize": { "headline-lg": ["26px", { "lineHeight": "34px", "letterSpacing": "-0.02em", "fontWeight": "700" }], "headline-md": ["20px", { "lineHeight": "28px", "letterSpacing": "-0.015em", "fontWeight": "700" }], "label-lg": ["14px", { "lineHeight": "20px", "letterSpacing": "-0.005em", "fontWeight": "600" }], "label-sm": ["11px", { "lineHeight": "14px", "letterSpacing": "0.04em", "fontWeight": "700" }], "body-md": ["14px", { "lineHeight": "20px", "letterSpacing": "0em", "fontWeight": "400" }], "stats-display": ["22px", { "lineHeight": "26px", "letterSpacing": "-0.04em", "fontWeight": "800" }], "headline-xl-mobile": ["30px", { "lineHeight": "38px", "letterSpacing": "-0.025em", "fontWeight": "800" }], "body-sm": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "400" }], "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "600" }], "headline-xl": ["36px", { "lineHeight": "44px", "letterSpacing": "-0.03em", "fontWeight": "800" }], "headline-sm": ["17px", { "lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "600" }], "body-lg": ["16px", { "lineHeight": "24px", "letterSpacing": "-0.01em", "fontWeight": "400" }] } } } }</script></head><body class="bg-surface font-body-md text-body-md text-on-surface flex flex-col min-h-screen pt-safe pb-safe"><main class="flex-1 flex flex-col relative w-full bg-surface"><div class="flex flex-col w-full pb-8">
+<!-- Progress Header -->
+<div class="px-margin-mobile pt-4 pb-2 flex items-center justify-between">
+<button class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-on-surface transition-transform active:scale-95" type="button">
+<span class="material-symbols-outlined text-[20px]">arrow_back</span>
+</button>
+<div class="flex flex-col items-center">
+<span class="font-label-sm text-label-sm uppercase tracking-wider text-secondary">Onboarding</span>
+<span class="font-label-md text-label-md text-on-surface-variant">Step 3 of 4: Location &amp; Format</span>
+</div>
+<div class="w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-secondary font-label-md">
+      75%
+    </div>
+</div>
+<!-- Progress Bar Line -->
+<div class="px-margin-mobile mb-6">
+<div class="w-full h-1.5 bg-surface-container-high rounded-full overflow-hidden flex">
+<div class="h-full bg-secondary w-3/4 rounded-full transition-all duration-500"></div>
+</div>
+</div>
+<!-- Hero Header -->
+<div class="px-margin-mobile mb-6">
+<div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-secondary-container text-on-secondary-container font-label-sm mb-2 shadow-sm">
+<span class="material-symbols-outlined text-[14px]" style="font-variation-settings: 'FILL' 1;">radar</span>
+<span>PITCH RADAR CALIBRATION</span>
+</div>
+<h1 class="font-headline-xl-mobile text-headline-xl-mobile text-on-surface">Set Your Match Radar</h1>
+<p class="font-body-md text-body-md text-on-surface-variant mt-1.5 leading-relaxed">
+      Discover games and pitch bookings within your neighborhood and travel radius.
+    </p>
+</div>
+<div class="px-margin-mobile flex flex-col gap-5">
+<!-- Location Card -->
+<div class="bg-surface-container-lowest p-4 rounded-xl shadow-sm flex flex-col gap-4">
+<div class="flex items-start justify-between gap-3">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 rounded-xl bg-primary-container text-secondary-fixed flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-[22px]">location_on</span>
+</div>
+<div>
+<span class="font-label-sm text-label-sm text-on-surface-variant block uppercase tracking-wider">Current Hub</span>
+<div class="font-headline-sm text-headline-sm text-on-surface">Riyadh, Al Nakheel District</div>
+</div>
+</div>
+<button class="px-3 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high active:scale-95 transition-all flex items-center gap-1.5 text-secondary font-label-md shrink-0" id="gpsBtn" type="button">
+<span class="material-symbols-outlined text-[16px] animate-pulse">my_location</span>
+<span>Auto GPS</span>
+</button>
+</div>
+<!-- Distance Slider Container -->
+<div class="bg-surface-container-low p-3.5 rounded-lg flex flex-col gap-2">
+<div class="flex justify-between items-center">
+<span class="font-label-md text-label-md text-on-surface">Travel Radius</span>
+<span class="font-stats-display text-stats-display text-secondary" id="radiusValue">15 km</span>
+</div>
+<!-- Interactive Range Input -->
+<input class="w-full accent-[#006d3b] h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer" id="radiusSlider" max="50" min="5" step="5" type="range" value="15"/>
+<!-- Slider Marks -->
+<div class="flex justify-between text-on-surface-variant font-label-sm px-1 pt-1">
+<span class="cursor-pointer" onclick="setRadius(5)">5 km</span>
+<span class="cursor-pointer" onclick="setRadius(10)">10 km</span>
+<span class="cursor-pointer font-bold text-secondary" onclick="setRadius(15)">15 km</span>
+<span class="cursor-pointer" onclick="setRadius(25)">25 km</span>
+<span class="cursor-pointer" onclick="setRadius(50)">50 km</span>
+</div>
+</div>
+<!-- Interactive Map Preview Card -->
+<div class="relative w-full h-44 rounded-xl overflow-hidden bg-primary-container shadow-inner">
+<!-- Tactical Pitch Field Grid Simulation -->
+<div class="absolute inset-0 opacity-20 bg-[radial-gradient(#72fda6_1px,transparent_1px)] [background-size:16px_16px]"></div>
+<!-- Subtle tactical lines -->
+<div class="absolute inset-x-8 top-1/2 -translate-y-1/2 h-24 border-dashed rounded-full opacity-30 pointer-events-none"></div>
+<!-- Radar Pulse Center (Current User) -->
+<div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
+<span class="absolute w-24 h-24 rounded-full bg-secondary-fixed opacity-20 animate-ping"></span>
+<span class="absolute w-14 h-14 rounded-full bg-secondary-fixed opacity-40"></span>
+<div class="relative w-8 h-8 rounded-full bg-primary-container text-secondary-fixed flex items-center justify-center shadow-lg">
+<span class="material-symbols-outlined text-[18px]">person_pin_circle</span>
+</div>
+</div>
+<!-- Active Match Pin 1 -->
+<div class="absolute top-6 left-10 flex items-center gap-1.5 bg-surface-container-lowest/95 backdrop-blur px-2 py-1 rounded-full shadow-md animate-bounce" style="animation-duration: 2.8s;">
+<span class="w-2.5 h-2.5 rounded-full bg-secondary-fixed animate-pulse"></span>
+<span class="font-label-sm text-label-sm text-on-surface font-bold">5v5 Arena • 1.2km</span>
+</div>
+<!-- Active Match Pin 2 -->
+<div class="absolute bottom-6 right-8 flex items-center gap-1.5 bg-surface-container-lowest/95 backdrop-blur px-2 py-1 rounded-full shadow-md animate-bounce" style="animation-duration: 3.2s;">
+<span class="w-2.5 h-2.5 rounded-full bg-secondary-fixed animate-pulse"></span>
+<span class="font-label-sm text-label-sm text-on-surface font-bold">7v7 Hub • 4.8km</span>
+</div>
+<!-- Active Match Pin 3 -->
+<div class="absolute top-8 right-12 flex items-center gap-1.5 bg-surface-container-lowest/95 backdrop-blur px-2 py-1 rounded-full shadow-md animate-bounce" style="animation-duration: 2.4s;">
+<span class="w-2.5 h-2.5 rounded-full bg-secondary-fixed animate-pulse"></span>
+<span class="font-label-sm text-label-sm text-on-surface font-bold">Pro Cage • 3.5km</span>
+</div>
+<!-- Map Floating Badge -->
+<div class="absolute bottom-2 left-2 bg-primary-container/85 backdrop-blur-sm text-secondary-fixed px-2.5 py-0.5 rounded-full font-label-sm flex items-center gap-1">
+<span class="material-symbols-outlined text-[13px]">sports_soccer</span>
+<span>14 matches in your radius</span>
+</div>
+</div>
+</div>
+<!-- Preferred Formats -->
+<div class="bg-surface-container-lowest p-4 rounded-xl shadow-sm flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<span class="font-headline-sm text-headline-sm text-on-surface">Game Formats</span>
+<span class="font-label-sm text-label-sm text-secondary">Multi-select</span>
+</div>
+<div class="grid grid-cols-1 gap-2.5">
+<!-- 5v5 Option (Checked) -->
+<label class="flex items-center justify-between p-3.5 rounded-lg bg-surface-container cursor-pointer transition-all active:scale-[0.99] select-none">
+<div class="flex items-center gap-3">
+<div class="w-9 h-9 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center font-headline-sm">
+              5
+            </div>
+<div>
+<div class="font-label-lg text-label-lg text-on-surface font-bold">5v5 (Futsal / Cage)</div>
+<div class="font-body-sm text-body-sm text-on-surface-variant">High tempo, short tactical sprints</div>
+</div>
+</div>
+<input checked="" class="w-5 h-5 accent-[#006d3b] rounded cursor-pointer" type="checkbox"/>
+</label>
+<!-- 7v7 Option (Checked) -->
+<label class="flex items-center justify-between p-3.5 rounded-lg bg-surface-container cursor-pointer transition-all active:scale-[0.99] select-none">
+<div class="flex items-center gap-3">
+<div class="w-9 h-9 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center font-headline-sm">
+              7
+            </div>
+<div>
+<div class="font-label-lg text-label-lg text-on-surface font-bold">7v7 (Mid-Pitch)</div>
+<div class="font-body-sm text-body-sm text-on-surface-variant">Optimal balance of stamina &amp; tactics</div>
+</div>
+</div>
+<input checked="" class="w-5 h-5 accent-[#006d3b] rounded cursor-pointer" type="checkbox"/>
+</label>
+<!-- 11v11 Option (Unchecked) -->
+<label class="flex items-center justify-between p-3.5 rounded-lg bg-surface-container-low cursor-pointer transition-all active:scale-[0.99] select-none opacity-80 hover:opacity-100">
+<div class="flex items-center gap-3">
+<div class="w-9 h-9 rounded-full bg-surface-container-highest text-on-surface-variant flex items-center justify-center font-headline-sm">
+              11
+            </div>
+<div>
+<div class="font-label-lg text-label-lg text-on-surface">11v11 (Full Field)</div>
+<div class="font-body-sm text-body-sm text-on-surface-variant">Full pitch 90-minute competitive matches</div>
+</div>
+</div>
+<input class="w-5 h-5 accent-[#006d3b] rounded cursor-pointer" type="checkbox"/>
+</label>
+</div>
+</div>
+<!-- Match Time Slots -->
+<div class="bg-surface-container-lowest p-4 rounded-xl shadow-sm flex flex-col gap-3">
+<div class="flex items-center justify-between">
+<span class="font-headline-sm text-headline-sm text-on-surface">Match Windows</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Select availability</span>
+</div>
+<div class="flex flex-col gap-2">
+<!-- Morning -->
+<div class="slot-tag flex items-center justify-between p-3 rounded-lg bg-surface-container-low cursor-pointer transition-all" onclick="toggleTag(this)">
+<div class="flex items-center gap-2.5">
+<span class="material-symbols-outlined text-[18px] text-on-surface-variant">wb_sunny</span>
+<span class="font-label-md text-label-md text-on-surface">Morning (06:00 - 10:00)</span>
+</div>
+<span class="tag-status material-symbols-outlined text-[18px] text-outline">radio_button_unchecked</span>
+</div>
+<!-- Evening / Post-Work (Selected) -->
+<div class="slot-tag flex items-center justify-between p-3 rounded-lg bg-primary-container text-on-primary cursor-pointer transition-all shadow-sm" onclick="toggleTag(this)">
+<div class="flex items-center gap-2.5">
+<span class="material-symbols-outlined text-[18px] text-secondary-fixed">wb_twilight</span>
+<span class="font-label-md text-label-md text-on-primary font-semibold">Evening / Post-Work (17:00 - 20:00)</span>
+</div>
+<span class="tag-status material-symbols-outlined text-[18px] text-secondary-fixed" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+</div>
+<!-- Night Games (Selected) -->
+<div class="slot-tag flex items-center justify-between p-3 rounded-lg bg-primary-container text-on-primary cursor-pointer transition-all shadow-sm" onclick="toggleTag(this)">
+<div class="flex items-center gap-2.5">
+<span class="material-symbols-outlined text-[18px] text-secondary-fixed">nights_stay</span>
+<span class="font-label-md text-label-md text-on-primary font-semibold">Night Games (20:00 - 00:00)</span>
+</div>
+<span class="tag-status material-symbols-outlined text-[18px] text-secondary-fixed" style="font-variation-settings: 'FILL' 1;">check_circle</span>
+</div>
+</div>
+</div>
+<!-- Notification Toggle Card -->
+<div class="bg-surface-container-lowest p-4 rounded-xl shadow-sm flex items-center justify-between gap-3">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 rounded-full bg-secondary-container text-on-secondary-container flex items-center justify-center shrink-0">
+<span class="material-symbols-outlined text-[20px]" style="font-variation-settings: 'FILL' 1;">notifications_active</span>
+</div>
+<div>
+<div class="font-label-md text-label-md text-on-surface font-bold">Instant Position Alerts</div>
+<div class="font-body-sm text-body-sm text-on-surface-variant leading-snug">Notify me when games near Riyadh need a <span class="font-semibold text-secondary">CAM</span>.</div>
+</div>
+</div>
+<!-- iOS style interactive toggle -->
+<label class="relative inline-flex items-center cursor-pointer shrink-0">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-12 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface-container-lowest after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-secondary"></div>
+</label>
+</div>
+<!-- Success Completion Preview Drawer / Card -->
+<div class="bg-surface-container p-4 rounded-xl shadow-md flex flex-col gap-4">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary text-[20px]" style="font-variation-settings: 'FILL' 1;">verified</span>
+<span class="font-label-md text-label-md text-on-surface uppercase tracking-wider font-bold">Player Match Passport</span>
+</div>
+<span class="px-2 py-0.5 rounded-full bg-secondary-container text-on-secondary-container font-label-sm">Ready to Compete</span>
+</div>
+<!-- Player Summary Preview Card -->
+<div class="flex items-center gap-3.5 bg-surface-container-lowest p-3 rounded-lg shadow-sm">
+<div class="relative w-14 h-14 rounded-full overflow-hidden shrink-0 shadow-sm">
+<img alt="Karim A. Soccer Player Portrait" class="w-full h-full object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDA7eVRUgO7Vw9E60I3j3NqJDvpWtmKZc4KUqBdDebfBRwYqkwvXUlaeXahh4QgRQLBWJzZkJKr1fVwOjbd7b0Vl7fq8Si9G3VlJzsv1xXAL8ziaa4WZuZmkD1iZkwoe1BX_AZSr4Q0MAB0lqHc8RiqM2nCzntIIu79f5KnuTrfQGkQDR69ByYHivKppQWsdWBnlXH9_UNBIkT_urjYbgd4dJzGfW7ObSWtdQ_kYH2h"/>
+<span class="absolute bottom-0 right-0 w-3.5 h-3.5 bg-secondary-fixed rounded-full"></span>
+</div>
+<div class="flex flex-col min-w-0 flex-1">
+<div class="flex items-center gap-1.5">
+<span class="font-headline-sm text-headline-sm text-on-surface truncate">Karim A.</span>
+<span class="px-1.5 py-0.5 rounded bg-primary-container text-secondary-fixed font-label-sm">CAM</span>
+</div>
+<span class="font-body-sm text-body-sm text-on-surface-variant truncate">7v7 / 5v5 Specialist • Riyadh</span>
+<div class="flex items-center gap-2 mt-1">
+<span class="font-label-sm text-label-sm text-secondary flex items-center gap-0.5">
+<span class="material-symbols-outlined text-[13px]" style="font-variation-settings: 'FILL' 1;">bolt</span>
+              Radar 15 km
+            </span>
+<span class="text-on-surface-variant text-[10px]">•</span>
+<span class="font-label-sm text-label-sm text-on-surface-variant">Evening Matches</span>
+</div>
+</div>
+</div>
+<!-- Final Celebration CTA Button -->
+<button class="w-full h-[52px] bg-secondary active:scale-[0.98] transition-all rounded-xl shadow-lg flex items-center justify-center gap-2 text-on-secondary font-label-lg font-bold" onclick="celebratePitch()" type="button">
+<span>Enter Pitch &amp; Find Matches ⚽</span>
+</button>
+<div class="text-center font-body-sm text-body-sm text-on-surface-variant">
+        No booking lock-ins • Join drop-in games anytime
+      </div>
+</div>
+</div>
+</div>
+<script>
+  function setRadius(val) {
+    const slider = document.getElementById('radiusSlider');
+    const display = document.getElementById('radiusValue');
+    slider.value = val;
+    display.textContent = val + ' km';
+  }
+
+  const slider = document.getElementById('radiusSlider');
+  if (slider) {
+    slider.addEventListener('input', function(e) {
+      document.getElementById('radiusValue').textContent = e.target.value + ' km';
+    });
+  }
+
+  function toggleTag(el) {
+    const icon = el.querySelector('.tag-status');
+    const hasActive = el.classList.contains('bg-primary-container');
+    
+    if (hasActive) {
+      el.classList.remove('bg-primary-container', 'text-on-primary');
+      el.classList.add('bg-surface-container-low');
+      const textEl = el.querySelector('.font-semibold');
+      if (textEl) {
+        textEl.classList.remove('text-on-primary', 'font-semibold');
+        textEl.classList.add('text-on-surface');
+      }
+      icon.textContent = 'radio_button_unchecked';
+      icon.classList.remove('text-secondary-fixed');
+      icon.classList.add('text-outline');
+      icon.style.fontVariationSettings = "'FILL' 0";
+    } else {
+      el.classList.add('bg-primary-container', 'text-on-primary');
+      el.classList.remove('bg-surface-container-low');
+      const textEl = el.querySelector('.font-label-md');
+      if (textEl) {
+        textEl.classList.add('text-on-primary', 'font-semibold');
+        textEl.classList.remove('text-on-surface');
+      }
+      icon.textContent = 'check_circle';
+      icon.classList.add('text-secondary-fixed');
+      icon.classList.remove('text-outline');
+      icon.style.fontVariationSettings = "'FILL' 1";
+    }
+  }
+
+  function celebratePitch() {
+    const btn = event.currentTarget;
+    btn.innerHTML = `<span class="material-symbols-outlined text-[20px] animate-spin">progress_activity</span> Finding local squads...`;
+    setTimeout(() => {
+      btn.innerHTML = `Welcome to the Pitch! 🏆`;
+      btn.classList.remove('bg-secondary');
+      btn.classList.add('bg-primary-container', 'text-secondary-fixed');
+    }, 1000);
+  }
+</script></main></body></html>
