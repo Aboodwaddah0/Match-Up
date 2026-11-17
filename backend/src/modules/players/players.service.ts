@@ -1,5 +1,6 @@
 import type { City, PlayerPosition, PlayerProfile, User } from '@prisma/client';
 import { z } from 'zod';
+import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import type { upsertProfileSchema } from './players.schemas';
@@ -65,12 +66,14 @@ async function toSelf(p: ProfileRow) {
   };
 }
 
+/** The caller's own profile, including birth date and saved location. 404 until they create one. */
 export async function getMyProfile(userId: string) {
   const p = await prisma.playerProfile.findUnique({ where: { userId }, include });
   if (!p) throw new AppError(404, 'PROFILE_NOT_FOUND', 'Create your player profile first');
   return toSelf(p);
 }
 
+/** Creates or fully replaces the caller's profile (idempotent PUT): positions, primary position, skill level, location. */
 export async function upsertMyProfile(userId: string, input: z.infer<typeof upsertProfileSchema>) {
   if (input.cityId && !(await prisma.city.findUnique({ where: { id: input.cityId } }))) {
     throw new AppError(400, 'INVALID_CITY', 'Unknown city');
@@ -100,20 +103,14 @@ export async function upsertMyProfile(userId: string, input: z.infer<typeof upse
   return getMyProfile(userId);
 }
 
+/** What other players see (no birth date, coordinates or e-mail). A profile of a user with a block either way is 404. */
 export async function getPublicProfile(viewerId: string, targetUserId: string) {
   const p = await prisma.playerProfile.findUnique({ where: { userId: targetUserId }, include });
   const notFound = new AppError(404, 'PLAYER_NOT_FOUND', 'Player not found');
   if (!p || p.user.status !== 'ACTIVE') throw notFound;
 
   if (viewerId !== targetUserId) {
-    const blocked = await prisma.blockedUser.findFirst({
-      where: {
-        OR: [
-          { blockerId: viewerId, blockedId: targetUserId },
-          { blockerId: targetUserId, blockedId: viewerId },
-        ],
-      },
-    });
+    const blocked = await areBlocked(viewerId, targetUserId);
     if (blocked) throw notFound; // indistinguishable from "does not exist"
   }
   return toPublic(p);

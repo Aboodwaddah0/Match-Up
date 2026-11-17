@@ -1,14 +1,12 @@
 import { Prisma, type MatchStatus } from '@prisma/client';
 import type { z } from 'zod';
+import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
+import type { Actor } from '../../types/actor';
+import { releaseBookingForMatch } from '../bookings/bookings.service';
 import { notify } from '../notifications/notify';
 import type { createMatchSchema, mineSchema, searchSchema, updateMatchSchema } from './matches.schemas';
-
-export interface Actor {
-  userId: string;
-  role: 'USER' | 'ADMIN';
-}
 
 const FORMAT_SIZE = { F5: 5, F7: 7, F11: 11 } as const;
 const MINUTE = 60_000;
@@ -25,6 +23,7 @@ type Relation = 'ORGANIZER' | 'PARTICIPANT' | 'REQUESTED' | 'INVITED' | 'NONE';
 
 // ───────────────────────── derived values (never stored, D17) ─────────────────────────
 
+/** Confirmed players per match, counted from participant rows. confirmed_count / available_spots are DERIVED, never stored (D17). */
 async function confirmedCounts(matchIds: string[]): Promise<Map<string, number>> {
   if (matchIds.length === 0) return new Map();
   const rows = await prisma.matchParticipant.groupBy({
@@ -35,6 +34,7 @@ async function confirmedCounts(matchIds: string[]): Promise<Map<string, number>>
   return new Map(rows.map((r) => [r.matchId, r._count._all]));
 }
 
+/** How the viewer relates to each match (organizer / participant / requested / invited), for the `myRelation` field. */
 async function relationsFor(matchIds: string[], userId: string): Promise<Map<string, Relation>> {
   const [parts, reqs, invs] = await Promise.all([
     prisma.matchParticipant.findMany({ where: { userId, matchId: { in: matchIds }, status: 'CONFIRMED' }, select: { matchId: true } }),
@@ -48,6 +48,7 @@ async function relationsFor(matchIds: string[], userId: string): Promise<Map<str
   return map;
 }
 
+/** Builds the API shape of matches for one viewer; derived counts apply to OPEN_MATCH only (a team challenge has no capacity). */
 export async function toDtos(rows: MatchRow[], actor: Actor, distances?: Map<string, number>) {
   const ids = rows.map((r) => r.id);
   const [counts, relations] = await Promise.all([confirmedCounts(ids), relationsFor(ids, actor.userId)]);
@@ -90,6 +91,7 @@ export async function toDtos(rows: MatchRow[], actor: Actor, distances?: Map<str
 
 // ───────────────────────── access ─────────────────────────
 
+/** A match with its relations; 404 if it does not exist. No visibility check: use loadViewableMatch / loadManageableMatch for that. */
 export async function loadMatch(id: string): Promise<MatchRow> {
   const m = await prisma.match.findUnique({ where: { id }, include: matchInclude });
   if (!m) throw new AppError(404, 'MATCH_NOT_FOUND', 'Match not found');
@@ -102,10 +104,7 @@ export async function loadViewableMatch(id: string, actor: Actor): Promise<Match
   const notFound = new AppError(404, 'MATCH_NOT_FOUND', 'Match not found');
   if (actor.role === 'ADMIN' || m.organizerId === actor.userId) return m;
 
-  const blocked = await prisma.blockedUser.count({
-    where: { OR: [{ blockerId: m.organizerId, blockedId: actor.userId }, { blockerId: actor.userId, blockedId: m.organizerId }] },
-  });
-  if (blocked > 0) throw notFound;
+  if (await areBlocked(m.organizerId, actor.userId)) throw notFound; // a block hides the match entirely
 
   if (m.visibility === 'PRIVATE') {
     const related = await prisma.match.count({
@@ -123,6 +122,7 @@ export async function loadViewableMatch(id: string, actor: Actor): Promise<Match
   return m;
 }
 
+/** Like loadViewableMatch, but only the organizer or an admin passes (403 otherwise). */
 export async function loadManageableMatch(id: string, actor: Actor): Promise<MatchRow> {
   const m = await loadViewableMatch(id, actor);
   if (m.organizerId !== actor.userId && actor.role !== 'ADMIN') {
@@ -144,21 +144,32 @@ export async function hasScheduleConflict(m: MatchRow, userId: string): Promise<
   return n > 0;
 }
 
+/** Appends a row to the match's status history (audit trail of every lifecycle transition). */
 async function recordEvent(tx: Prisma.TransactionClient, matchId: string, actorId: string, from: MatchStatus, to: MatchStatus, reason?: string | null) {
   await tx.matchEvent.create({ data: { matchId, actorId, fromStatus: from, toStatus: to, reason: reason ?? undefined } });
 }
 
+/**
+ * Tells the database triggers that this transaction is run by an admin (transaction-local setting).
+ * Some lifecycle transitions are admin-only, e.g. recovering a CLOSED_UNCONFIRMED match after the organizer's 7-day window.
+ */
 async function markAdminActor(tx: Prisma.TransactionClient, actor: Actor): Promise<void> {
   // Lets the DB state machine allow admin-only transitions (see fym_match_guard).
   if (actor.role === 'ADMIN') await tx.$queryRaw`SELECT set_config('fym.actor_is_admin', 'true', true)`;
 }
 
+/** 400 when the city id does not exist (cities are seeded reference data). */
 async function assertCityExists(cityId?: string | null) {
   if (cityId && !(await prisma.city.findUnique({ where: { id: cityId } }))) throw new AppError(400, 'INVALID_CITY', 'Unknown city');
 }
 
 // ───────────────────────── use cases ─────────────────────────
 
+/**
+ * Creates an OPEN_MATCH owned by the caller. `capacity` is the number of players wanted through the app (D13),
+ * not the whole pitch. An optional `bookingId` links the organizer's own CONFIRMED booking (the match must fit inside it);
+ * location and city default from that booking's venue. The DB trigger sets the initial status and validates the link.
+ */
 export async function createMatch(actor: Actor, input: z.infer<typeof createMatchSchema>) {
   await assertCityExists(input.cityId);
   // Booking and Match stay separate entities: the match only references the booking; location defaults come from its venue.
@@ -197,6 +208,7 @@ export async function createMatch(actor: Actor, input: z.infer<typeof createMatc
   return (await toDtos([m], actor))[0]!;
 }
 
+/** Match details for a viewer who is allowed to see it. The organizer and admins also get the pending-request count. */
 export async function getMatch(actor: Actor, id: string) {
   const m = await loadViewableMatch(id, actor);
   const [dto] = await toDtos([m], actor);
@@ -213,6 +225,7 @@ export async function getMatch(actor: Actor, id: string) {
 }
 
 /** TEAM_CHALLENGE: the two sides with how many players each has confirmed vs the format requires. */
+/** TEAM_CHALLENGE only: the two sides with how many players each has confirmed vs the format requires. */
 async function teamSides(matchId: string, format: keyof typeof FORMAT_SIZE) {
   const sides = await prisma.matchTeam.findMany({
     where: { matchId },
@@ -222,6 +235,11 @@ async function teamSides(matchId: string, format: keyof typeof FORMAT_SIZE) {
   return sides.map((s) => ({ side: s.side, team: s.team, rosterCount: s._count.participants, required: FORMAT_SIZE[format] }));
 }
 
+/**
+ * Edits an OPEN / FULL open match (organizer or admin). Rules enforced by the DB triggers, so they hold under races:
+ * capacity never below the confirmed count and not after start; the time can change only while nobody is confirmed (D12).
+ * Pending requesters are notified when the time changes.
+ */
 export async function updateMatch(actor: Actor, id: string, input: z.infer<typeof updateMatchSchema>) {
   const m = await loadManageableMatch(id, actor);
   if (m.type !== 'OPEN_MATCH' || !['OPEN', 'FULL'].includes(m.status)) {
@@ -273,6 +291,12 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
   return getMatch(actor, id);
 }
 
+/**
+ * Cancels a match (an explicit human decision, unlike CLOSED_UNCONFIRMED which means "unknown").
+ * The DB trigger moves participants to MATCH_CANCELLED (slots freed, no penalty) and expires pending requests and
+ * invitations. `releaseBooking` also cancels the organizer's own in-app booking so the venue slot is freed.
+ * Everything happens in ONE transaction, so the match, its participants and the booking never disagree.
+ */
 export async function cancelMatch(actor: Actor, id: string, reason?: string | null, releaseBooking = false) {
   const m = await loadManageableMatch(id, actor);
   // Organizers cancel before start (or recover a CLOSED_UNCONFIRMED match). Cancelling a match
@@ -292,26 +316,11 @@ export async function cancelMatch(actor: Actor, id: string, reason?: string | nu
     // DB trigger: participants -> MATCH_CANCELLED (slots freed, no penalty), pending requests/invitations expire.
     await tx.match.update({ where: { id }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason ?? undefined } });
     await recordEvent(tx, id, actor.userId, m.status, 'CANCELLED', reason);
-    if (releaseBooking && m.bookingId) await releaseLinkedBooking(tx, actor, m.bookingId);
+    if (releaseBooking && m.bookingId) await releaseBookingForMatch(tx, actor, m.bookingId);
     await notify(tx, [...participants, ...requests].map((r) => r.userId).filter((u) => u !== actor.userId), 'MATCH_CANCELLED',
       { matchId: id, title: m.title, reason: reason ?? null }, { type: 'match', id });
   });
   return getMatch(actor, id);
-}
-
-/** Cancels the organizer's own in-app booking so the venue slot is freed; EXTERNAL bookings can only be unlinked. */
-async function releaseLinkedBooking(tx: Prisma.TransactionClient, actor: Actor, bookingId: string) {
-  const b = await tx.booking.findUnique({ where: { id: bookingId }, include: { field: { select: { venueId: true } } } });
-  if (!b || b.source !== 'IN_APP' || !['PENDING', 'CONFIRMED'].includes(b.status)) return;
-  if (b.createdById !== actor.userId && actor.role !== 'ADMIN') return;
-  await tx.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: 'match cancelled' } });
-  await tx.bookingEvent.create({ data: { bookingId, actorId: actor.userId, fromStatus: b.status, toStatus: 'CANCELLED', reason: 'match cancelled' } });
-  const venue = await tx.venue.findUniqueOrThrow({
-    where: { id: b.field!.venueId },
-    select: { ownerId: true, staff: { where: { permissions: { has: 'MANAGE_BOOKINGS' } }, select: { userId: true } } },
-  });
-  const managers = [venue.ownerId, ...venue.staff.map((s) => s.userId)].filter((u) => u !== actor.userId);
-  await notify(tx, managers, 'BOOKING_CANCELLED', { bookingId, byVenue: false, reason: 'match cancelled', startAt: b.startAt.toISOString() }, { type: 'booking', id: bookingId });
 }
 
 /** Only the organizer (or an admin) confirms the match really took place (D5). */
@@ -331,6 +340,11 @@ export async function completeMatch(actor: Actor, id: string) {
 
 // ───────────────────────── discovery ─────────────────────────
 
+/**
+ * Public discovery of open matches. Hides private matches, matches already started, and matches of organizers who have
+ * a block with the viewer. With lat/lng it sorts by distance, using `earth_box` (index-friendly) before the exact
+ * `earth_distance` check, same technique as venue search.
+ */
 export async function searchMatches(actor: Actor, q: z.infer<typeof searchSchema>) {
   const conds: Prisma.Sql[] = [
     Prisma.sql`m.type = 'OPEN_MATCH'`,
@@ -388,6 +402,7 @@ export async function searchMatches(actor: Actor, q: z.infer<typeof searchSchema
 }
 
 /** My matches: organized by me / I am confirmed in / I asked to join. */
+/** The viewer's matches by role (organized / playing / requested) and scope (upcoming / past). */
 export async function myMatches(actor: Actor, q: z.infer<typeof mineSchema>) {
   const now = new Date();
   const time: Prisma.MatchWhereInput = q.scope === 'upcoming' ? { endAt: { gte: now } } : { endAt: { lt: now } };

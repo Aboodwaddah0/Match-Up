@@ -4,12 +4,14 @@ import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { localParts, minutesToTimeColumn, parseHm, timeColumnToMinutes, weekdayOf, zonedToUtc } from '../../lib/time';
-import { requireVenuePermission, type Actor } from './venues.access';
+import type { Actor } from '../../types/actor';
+import { requireVenuePermission } from './venues.access';
 import type { createBlockSchema, createFieldSchema, openingHoursSchema, updateFieldSchema } from './venues.schemas';
 
 const FORMAT_SIZE = { F5: 5, F7: 7, F11: 11 } as const;
 const MAX_BOOKING_MINUTES = 6 * 60;
 
+/** A field with its venue and weekly hours; 404 if missing. Callers then check permissions on `field.venueId`. */
 async function loadField(fieldId: string) {
   const field = await prisma.venueField.findUnique({ where: { id: fieldId }, include: { venue: true, openingHours: true } });
   if (!field) throw new AppError(404, 'FIELD_NOT_FOUND', 'Field not found');
@@ -18,6 +20,7 @@ async function loadField(fieldId: string) {
 
 // ───────────────────────── fields ─────────────────────────
 
+/** Adds a field to a venue (requires MANAGE_FIELDS). Capacity defaults to both teams of the format (2 x players per side). */
 export async function createField(actor: Actor, venueId: string, input: z.infer<typeof createFieldSchema>) {
   await requireVenuePermission(actor, venueId, 'MANAGE_FIELDS');
   const f = await prisma.venueField.create({
@@ -26,6 +29,7 @@ export async function createField(actor: Actor, venueId: string, input: z.infer<
   return { field: toField(f) };
 }
 
+/** Changes a field's name, price or active flag (requires MANAGE_FIELDS on its venue). */
 export async function updateField(actor: Actor, fieldId: string, input: z.infer<typeof updateFieldSchema>) {
   const field = await loadField(fieldId);
   await requireVenuePermission(actor, field.venueId, 'MANAGE_FIELDS');
@@ -54,6 +58,13 @@ export async function setOpeningHours(actor: Actor, fieldId: string, input: z.in
 
 // ───────────────────────── blocks (D11: NOT bookings) ─────────────────────────
 
+/**
+ * Blocks time on one field, or on every active field of the venue (`allFields`), for maintenance or offline customers.
+ * A block is NOT a booking (D11). It never cancels anyone silently: if live bookings overlap, nothing is created and the
+ * clashing bookings are returned so the owner can reject / cancel them first. The pre-check is only for a friendly
+ * message; the database re-checks atomically (per-field lock + exclusion constraints), so a booking request that
+ * sneaks in between the check and the insert still cannot overlap the block.
+ */
 export async function createBlock(actor: Actor, fieldId: string, input: z.infer<typeof createBlockSchema>) {
   const field = await loadField(fieldId);
   await requireVenuePermission(actor, field.venueId, 'MANAGE_AVAILABILITY');
@@ -94,6 +105,7 @@ function toBlock(b: { id: string; venueFieldId: string; startAt: Date; endAt: Da
   return { id: b.id, fieldId: b.venueFieldId, startAt: b.startAt, endAt: b.endAt, reason: b.reason, note: b.note, groupId: b.groupId };
 }
 
+/** Upcoming blocks of a field (from now, or from `from`); requires MANAGE_AVAILABILITY. */
 export async function listBlocks(actor: Actor, fieldId: string, from?: string) {
   const field = await loadField(fieldId);
   await requireVenuePermission(actor, field.venueId, 'MANAGE_AVAILABILITY');
@@ -104,6 +116,7 @@ export async function listBlocks(actor: Actor, fieldId: string, from?: string) {
   return { blocks: rows.map(toBlock) };
 }
 
+/** Removes a block, freeing the time again (requires MANAGE_AVAILABILITY on the block's venue). */
 export async function deleteBlock(actor: Actor, blockId: string): Promise<void> {
   const block = await prisma.venueBlock.findUnique({ where: { id: blockId }, include: { field: true } });
   if (!block) throw new AppError(404, 'BLOCK_NOT_FOUND', 'Block not found');
@@ -144,6 +157,10 @@ export function assertBookableWindow(field: FieldWithHours, timeZone: string, st
   if (!fits) throw new AppError(409, 'OUTSIDE_OPENING_HOURS', 'The field is closed at that time');
 }
 
+/**
+ * Bookable slots of a field for one LOCAL calendar date in the venue's time zone. A slot is unavailable when it is in the
+ * past, or overlaps a CONFIRMED booking, a live PENDING hold (hold not expired), or a block. Public: needs no permission.
+ */
 export async function getAvailability(fieldId: string, date: string) {
   const field = await loadField(fieldId);
   if (!field.isActive || field.venue.status !== 'ACTIVE') throw new AppError(404, 'FIELD_NOT_FOUND', 'Field not found');

@@ -1,46 +1,32 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
-import { venueIdParams } from '../venues/venues.schemas';
-import { bookingIdParams, createBookingSchema, externalBookingSchema, myBookingsSchema, reasonSchema, venueBookingsSchema } from './bookings.schemas';
-import * as bookings from './bookings.service';
+import { validate } from '../../middleware/validate';
+import * as bookings from './bookings.controller';
+import {
+  bookingIdParams,
+  createBookingSchema,
+  externalBookingSchema,
+  myBookingsSchema,
+  reasonSchema,
+  venueBookingsSchema,
+  venueIdParams,
+} from './bookings.schemas';
 
-const actor = (req: { auth?: { userId: string; role: 'USER' | 'ADMIN' } }) => ({ userId: req.auth!.userId, role: req.auth!.role });
-
-// ───────── /api/v1/bookings (players / organizers) ─────────
+// ───────── /api/v1/bookings (players / organizers, plus venue staff answering requests) ─────────
 export const bookingsRouter = Router();
 bookingsRouter.use(authenticate);
 
-bookingsRouter.post('/', requireVerifiedEmail, async (req, res) => {
-  res.status(201).json(await bookings.createBooking(actor(req), createBookingSchema.parse(req.body)));
-});
-bookingsRouter.post('/external', requireVerifiedEmail, async (req, res) => {
-  res.status(201).json(await bookings.createExternalBooking(actor(req), externalBookingSchema.parse(req.body)));
-});
-bookingsRouter.get('/mine', async (req, res) => {
-  res.json(await bookings.myBookings(actor(req), myBookingsSchema.parse(req.query)));
-});
-bookingsRouter.get('/:bookingId', async (req, res) => {
-  const { bookingId } = bookingIdParams.parse(req.params);
-  res.json(await bookings.getBooking(actor(req), bookingId));
-});
-bookingsRouter.post('/:bookingId/cancel', async (req, res) => {
-  const { bookingId } = bookingIdParams.parse(req.params);
-  res.json(await bookings.cancelBooking(actor(req), bookingId, reasonSchema.parse(req.body ?? {}).reason));
-});
-// venue staff answer requests
-bookingsRouter.post('/:bookingId/confirm', async (req, res) => {
-  const { bookingId } = bookingIdParams.parse(req.params);
-  res.json(await bookings.confirmBooking(actor(req), bookingId));
-});
-bookingsRouter.post('/:bookingId/reject', async (req, res) => {
-  const { bookingId } = bookingIdParams.parse(req.params);
-  res.json(await bookings.rejectBooking(actor(req), bookingId, reasonSchema.parse(req.body ?? {}).reason));
-});
+bookingsRouter.post('/', requireVerifiedEmail, validate({ body: createBookingSchema }), bookings.create);
+bookingsRouter.post('/external', requireVerifiedEmail, validate({ body: externalBookingSchema }), bookings.createExternal);
+bookingsRouter.get('/mine', validate({ query: myBookingsSchema }), bookings.mine);
+bookingsRouter.get('/:bookingId', validate({ params: bookingIdParams }), bookings.get);
+bookingsRouter.post('/:bookingId/cancel', validate({ params: bookingIdParams, body: reasonSchema, optionalBody: true }), bookings.cancel);
+
+// venue staff answer requests (permission is checked in the service, per venue)
+bookingsRouter.post('/:bookingId/confirm', validate({ params: bookingIdParams }), bookings.confirm);
+bookingsRouter.post('/:bookingId/reject', validate({ params: bookingIdParams, body: reasonSchema, optionalBody: true }), bookings.reject);
 
 // ───────── /api/v1/venues/:venueId/bookings (venue staff inbox) ─────────
 export const venueBookingsRouter = Router({ mergeParams: true });
 venueBookingsRouter.use(authenticate);
-venueBookingsRouter.get('/', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.json(await bookings.venueBookings(actor(req), venueId, venueBookingsSchema.parse(req.query)));
-});
+venueBookingsRouter.get('/', validate({ params: venueIdParams, query: venueBookingsSchema }), bookings.venueInbox);

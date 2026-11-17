@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
-import * as fields from './fields.service';
+import { validate } from '../../middleware/validate';
+import * as fields from './fields.controller';
+import * as venues from './venues.controller';
 import {
   availabilitySchema,
   blockIdParams,
@@ -19,91 +21,39 @@ import {
   venueIdParams,
   venueSearchSchema,
 } from './venues.schemas';
-import * as venues from './venues.service';
 
-const actor = (req: { auth?: { userId: string; role: 'USER' | 'ADMIN' } }) => ({ userId: req.auth!.userId, role: req.auth!.role });
+// Permissions (owner / staff / admin) are checked per venue inside the services, not here.
 
 // ───────── /api/v1/venues ─────────
 export const venuesRouter = Router();
 venuesRouter.use(authenticate);
 
-venuesRouter.get('/', async (req, res) => {
-  res.json(await venues.searchVenues(venueSearchSchema.parse(req.query)));
-});
-venuesRouter.get('/mine', async (req, res) => {
-  res.json(await venues.myVenues(actor(req)));
-});
-venuesRouter.post('/', requireVerifiedEmail, async (req, res) => {
-  res.status(201).json({ venue: await venues.createVenue(actor(req), createVenueSchema.parse(req.body)) });
-});
-venuesRouter.get('/:venueId', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.json({ venue: await venues.getVenue(actor(req), venueId) });
-});
-venuesRouter.patch('/:venueId', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.json({ venue: await venues.updateVenue(actor(req), venueId, updateVenueSchema.parse(req.body)) });
-});
+venuesRouter.get('/', validate({ query: venueSearchSchema }), venues.search);
+venuesRouter.get('/mine', venues.mine);
+venuesRouter.post('/', requireVerifiedEmail, validate({ body: createVenueSchema }), venues.create);
+venuesRouter.get('/:venueId', validate({ params: venueIdParams }), venues.get);
+venuesRouter.patch('/:venueId', validate({ params: venueIdParams, body: updateVenueSchema }), venues.update);
 
-venuesRouter.post('/:venueId/fields', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.status(201).json(await fields.createField(actor(req), venueId, createFieldSchema.parse(req.body)));
-});
+venuesRouter.post('/:venueId/fields', validate({ params: venueIdParams, body: createFieldSchema }), fields.create);
 
-venuesRouter.get('/:venueId/staff', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.json(await venues.listStaff(actor(req), venueId));
-});
-venuesRouter.post('/:venueId/staff', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.status(201).json(await venues.addStaff(actor(req), venueId, staffSchema.parse(req.body)));
-});
-venuesRouter.delete('/:venueId/staff/:userId', async (req, res) => {
-  const { venueId, userId } = staffParams.parse(req.params);
-  await venues.removeStaff(actor(req), venueId, userId);
-  res.status(204).end();
-});
+venuesRouter.get('/:venueId/staff', validate({ params: venueIdParams }), venues.listStaff);
+venuesRouter.post('/:venueId/staff', validate({ params: venueIdParams, body: staffSchema }), venues.addStaff);
+venuesRouter.delete('/:venueId/staff/:userId', validate({ params: staffParams }), venues.removeStaff);
 
-venuesRouter.post('/:venueId/images', async (req, res) => {
-  const { venueId } = venueIdParams.parse(req.params);
-  res.status(201).json(await venues.addImage(actor(req), venueId, imageSchema.parse(req.body).url));
-});
-venuesRouter.delete('/:venueId/images/:imageId', async (req, res) => {
-  const { venueId, imageId } = imageParams.parse(req.params);
-  await venues.removeImage(actor(req), venueId, imageId);
-  res.status(204).end();
-});
+venuesRouter.post('/:venueId/images', validate({ params: venueIdParams, body: imageSchema }), venues.addImage);
+venuesRouter.delete('/:venueId/images/:imageId', validate({ params: imageParams }), venues.removeImage);
 
 // ───────── /api/v1/fields ─────────
 export const fieldsRouter = Router();
 fieldsRouter.use(authenticate);
 
-fieldsRouter.patch('/:fieldId', async (req, res) => {
-  const { fieldId } = fieldIdParams.parse(req.params);
-  res.json(await fields.updateField(actor(req), fieldId, updateFieldSchema.parse(req.body)));
-});
-fieldsRouter.put('/:fieldId/opening-hours', async (req, res) => {
-  const { fieldId } = fieldIdParams.parse(req.params);
-  res.json(await fields.setOpeningHours(actor(req), fieldId, openingHoursSchema.parse(req.body)));
-});
-fieldsRouter.get('/:fieldId/availability', async (req, res) => {
-  const { fieldId } = fieldIdParams.parse(req.params);
-  res.json(await fields.getAvailability(fieldId, availabilitySchema.parse(req.query).date));
-});
-fieldsRouter.get('/:fieldId/blocks', async (req, res) => {
-  const { fieldId } = fieldIdParams.parse(req.params);
-  res.json(await fields.listBlocks(actor(req), fieldId, listBlocksSchema.parse(req.query).from));
-});
-fieldsRouter.post('/:fieldId/blocks', async (req, res) => {
-  const { fieldId } = fieldIdParams.parse(req.params);
-  res.status(201).json(await fields.createBlock(actor(req), fieldId, createBlockSchema.parse(req.body)));
-});
+fieldsRouter.patch('/:fieldId', validate({ params: fieldIdParams, body: updateFieldSchema }), fields.update);
+fieldsRouter.put('/:fieldId/opening-hours', validate({ params: fieldIdParams, body: openingHoursSchema }), fields.setOpeningHours);
+fieldsRouter.get('/:fieldId/availability', validate({ params: fieldIdParams, query: availabilitySchema }), fields.availability);
+fieldsRouter.get('/:fieldId/blocks', validate({ params: fieldIdParams, query: listBlocksSchema }), fields.listBlocks);
+fieldsRouter.post('/:fieldId/blocks', validate({ params: fieldIdParams, body: createBlockSchema }), fields.createBlock);
 
 // ───────── /api/v1/blocks ─────────
 export const blocksRouter = Router();
 blocksRouter.use(authenticate);
-blocksRouter.delete('/:blockId', async (req, res) => {
-  const { blockId } = blockIdParams.parse(req.params);
-  await fields.deleteBlock(actor(req), blockId);
-  res.status(204).end();
-});
+blocksRouter.delete('/:blockId', validate({ params: blockIdParams }), fields.deleteBlock);

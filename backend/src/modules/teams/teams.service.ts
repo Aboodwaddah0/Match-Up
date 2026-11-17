@@ -1,8 +1,9 @@
 import type { Prisma, TeamRole } from '@prisma/client';
 import type { z } from 'zod';
+import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
-import type { Actor } from '../matches/matches.service';
+import type { Actor } from '../../types/actor';
 import { notify } from '../notifications/notify';
 import type { createTeamSchema, searchTeamsSchema, updateTeamSchema } from './teams.schemas';
 
@@ -18,11 +19,13 @@ const DAY = 86_400_000;
 
 const userSummary = { select: { id: true, fullName: true, avatarUrl: true } } as const;
 
+/** The user's role in the team, or null when they are not a member. */
 export async function myRole(teamId: string, userId: string): Promise<TeamRole | null> {
   const m = await prisma.teamMember.findUnique({ where: { teamId_userId: { teamId, userId } }, select: { role: true } });
   return m?.role ?? null;
 }
 
+/** Requires captain or vice captain (403 otherwise; 404 when the team does not exist) and returns the caller's role. */
 export async function requireStaff(teamId: string, actor: Actor): Promise<TeamRole> {
   const role = await myRole(teamId, actor.userId);
   if (!role) {
@@ -74,6 +77,7 @@ function toDto(t: TeamRow, viewerId: string) {
   };
 }
 
+/** Creates a team; the creator becomes its CAPTAIN in the same insert (there is no captain column: the captain is a member row). */
 export async function createTeam(actor: Actor, input: z.infer<typeof createTeamSchema>) {
   await assertCityExists(input.cityId);
   const t = await prisma.team.create({
@@ -89,12 +93,14 @@ export async function createTeam(actor: Actor, input: z.infer<typeof createTeamS
   return toDto(t, actor.userId);
 }
 
+/** Team details with members. Public to any signed-in user; `myRole` is set for members. */
 export async function getTeam(actor: Actor, teamId: string) {
   const t = await prisma.team.findUnique({ where: { id: teamId }, include: teamInclude });
   if (!t) throw new AppError(404, 'TEAM_NOT_FOUND', 'Team not found');
   return toDto(t, actor.userId);
 }
 
+/** Edits name, description, logo or city (captain / vice captain). */
 export async function updateTeam(actor: Actor, teamId: string, input: z.infer<typeof updateTeamSchema>) {
   await requireStaff(teamId, actor);
   await assertCityExists(input.cityId);
@@ -102,6 +108,7 @@ export async function updateTeam(actor: Actor, teamId: string, input: z.infer<ty
   return getTeam(actor, teamId);
 }
 
+/** Searches teams by name (case-insensitive) and city, alphabetical. */
 export async function searchTeams(actor: Actor, q: z.infer<typeof searchTeamsSchema>) {
   const where: Prisma.TeamWhereInput = {
     ...(q.q ? { name: { contains: q.q, mode: 'insensitive' } } : {}),
@@ -114,6 +121,7 @@ export async function searchTeams(actor: Actor, q: z.infer<typeof searchTeamsSch
   return { teams: rows.map((t) => toDto(t, actor.userId)), page: q.page, pageSize: q.pageSize, total };
 }
 
+/** Teams the caller belongs to. */
 export async function myTeams(actor: Actor) {
   const rows = await prisma.team.findMany({ where: { members: { some: { userId: actor.userId } } }, include: teamInclude, orderBy: { name: 'asc' } });
   return { teams: rows.map((t) => toDto(t, actor.userId)) };
@@ -134,6 +142,7 @@ export async function removeMember(actor: Actor, teamId: string, userId: string)
   });
 }
 
+/** A member leaves (the captain must transfer the captaincy first). Also drops them from the team's upcoming match rosters. */
 export async function leaveTeam(actor: Actor, teamId: string): Promise<void> {
   const role = await myRole(teamId, actor.userId);
   if (!role) throw new AppError(404, 'NOT_A_TEAM_MEMBER', 'You are not in this team');
@@ -153,6 +162,7 @@ async function dropFromUpcomingRosters(tx: Prisma.TransactionClient, teamId: str
   });
 }
 
+/** Captain-only: promote a member to vice captain or demote back. The captain role itself changes only by transfer. */
 export async function setMemberRole(actor: Actor, teamId: string, userId: string, role: 'VICE_CAPTAIN' | 'MEMBER') {
   if ((await myRole(teamId, actor.userId)) !== 'CAPTAIN') throw new AppError(403, 'FORBIDDEN', 'Only the captain can change roles');
   const target = await prisma.teamMember.findUnique({ where: { teamId_userId: { teamId, userId } } });
@@ -162,6 +172,11 @@ export async function setMemberRole(actor: Actor, teamId: string, userId: string
   return getTeam(actor, teamId);
 }
 
+/**
+ * Captain-only: hands the captaincy to another member; the old captain becomes vice captain.
+ * Concurrency: the captain's row is locked (`FOR UPDATE`) so two simultaneous transfers serialize, and the old captain is
+ * demoted BEFORE the new one is promoted because the DB allows exactly one CAPTAIN per team (partial unique index).
+ */
 export async function transferCaptaincy(actor: Actor, teamId: string, userId: string) {
   if (userId === actor.userId) throw new AppError(400, 'INVALID_TARGET', 'You are already the captain');
   await prisma.$transaction(async (tx) => {
@@ -183,12 +198,12 @@ export async function inviteToTeam(actor: Actor, teamId: string, inviteeId: stri
   await requireStaff(teamId, actor);
   const [invitee, blocked, isMember, memberCount, team] = await Promise.all([
     prisma.user.findUnique({ where: { id: inviteeId }, select: { status: true } }),
-    prisma.blockedUser.count({ where: { OR: [{ blockerId: actor.userId, blockedId: inviteeId }, { blockerId: inviteeId, blockedId: actor.userId }] } }),
+    areBlocked(actor.userId, inviteeId),
     prisma.teamMember.count({ where: { teamId, userId: inviteeId } }),
     prisma.teamMember.count({ where: { teamId } }),
     prisma.team.findUniqueOrThrow({ where: { id: teamId }, select: { name: true } }),
   ]);
-  if (!invitee || invitee.status !== 'ACTIVE' || blocked > 0) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+  if (!invitee || invitee.status !== 'ACTIVE' || blocked) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
   if (isMember > 0) throw new AppError(409, 'ALREADY_TEAM_MEMBER', 'This player is already in the team');
   if (memberCount >= MAX_TEAM_MEMBERS) throw new AppError(409, 'TEAM_FULL', `A team can have at most ${MAX_TEAM_MEMBERS} players`);
 
@@ -203,6 +218,7 @@ export async function inviteToTeam(actor: Actor, teamId: string, inviteeId: stri
   });
 }
 
+/** Pending, unexpired invitations the team has sent (captain / vice captain). */
 export async function listTeamInvitations(actor: Actor, teamId: string) {
   await requireStaff(teamId, actor);
   const rows = await prisma.teamInvitation.findMany({
@@ -213,6 +229,7 @@ export async function listTeamInvitations(actor: Actor, teamId: string) {
   return { invitations: rows.map((i) => ({ id: i.id, status: i.status, expiresAt: i.expiresAt, createdAt: i.createdAt, invitee: i.invitee })) };
 }
 
+/** Pending, unexpired team invitations addressed to the caller. */
 export async function myInvitations(actor: Actor) {
   const rows = await prisma.teamInvitation.findMany({
     where: { inviteeId: actor.userId, status: 'PENDING', expiresAt: { gt: new Date() } },
@@ -222,6 +239,11 @@ export async function myInvitations(actor: Actor) {
   return { invitations: rows.map((i) => ({ id: i.id, team: i.team, invitedBy: i.invitedBy, expiresAt: i.expiresAt, createdAt: i.createdAt })) };
 }
 
+/**
+ * The invitee accepts or declines. An expired invitation is marked EXPIRED and refused. The answer is an atomic claim
+ * (`updateMany ... WHERE status = PENDING`), so only one of two concurrent answers wins; accepting re-checks the team size
+ * inside the same transaction and adds the member.
+ */
 export async function respondToInvitation(actor: Actor, invitationId: string, decision: 'accept' | 'decline') {
   const inv = await prisma.teamInvitation.findUnique({ where: { id: invitationId }, include: { team: { select: { name: true } } } });
   if (!inv || inv.inviteeId !== actor.userId) throw new AppError(404, 'INVITATION_NOT_FOUND', 'Invitation not found');
@@ -255,6 +277,7 @@ export async function respondToInvitation(actor: Actor, invitationId: string, de
   return decision === 'accept' ? { joined: true, team: await getTeam(actor, inv.teamId) } : { joined: false };
 }
 
+/** Staff withdraw a pending invitation (409 if it was already answered). */
 export async function cancelInvitation(actor: Actor, invitationId: string): Promise<void> {
   const inv = await prisma.teamInvitation.findUnique({ where: { id: invitationId } });
   if (!inv) throw new AppError(404, 'INVITATION_NOT_FOUND', 'Invitation not found');

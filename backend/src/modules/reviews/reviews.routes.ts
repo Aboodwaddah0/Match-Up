@@ -1,28 +1,16 @@
 import { Router } from 'express';
-import { z } from 'zod';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
-import { createReview, createReviewSchema, listPlayerReviews, listReviewsSchema, pendingReviews } from './reviews.service';
-
-const actor = (req: { auth?: { userId: string; role: 'USER' | 'ADMIN' } }) => ({ userId: req.auth!.userId, role: req.auth!.role });
+import { validate } from '../../middleware/validate';
+import * as reviews from './reviews.controller';
+import { createReviewSchema, listReviewsSchema, matchParams, playerParams } from './reviews.schemas';
 
 // /api/v1/matches/:matchId/reviews
 export const matchReviewsRouter = Router({ mergeParams: true });
 matchReviewsRouter.use(authenticate);
-const matchParams = z.object({ matchId: z.uuid() });
-
-matchReviewsRouter.post('/', requireVerifiedEmail, async (req, res) => {
-  const { matchId } = matchParams.parse(req.params);
-  res.status(201).json(await createReview(actor(req), matchId, createReviewSchema.parse(req.body)));
-});
-matchReviewsRouter.get('/pending', async (req, res) => {
-  const { matchId } = matchParams.parse(req.params);
-  res.json(await pendingReviews(actor(req), matchId));
-});
+matchReviewsRouter.post('/', requireVerifiedEmail, validate({ params: matchParams, body: createReviewSchema }), reviews.create);
+matchReviewsRouter.get('/pending', validate({ params: matchParams }), reviews.pending);
 
 // /api/v1/players/:userId/reviews
 export const playerReviewsRouter = Router({ mergeParams: true });
 playerReviewsRouter.use(authenticate);
-playerReviewsRouter.get('/', async (req, res) => {
-  const { userId } = z.object({ userId: z.uuid() }).parse(req.params);
-  res.json(await listPlayerReviews(actor(req), userId, listReviewsSchema.parse(req.query)));
-});
+playerReviewsRouter.get('/', validate({ params: playerParams, query: listReviewsSchema }), reviews.listForPlayer);

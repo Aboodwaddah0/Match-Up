@@ -4,7 +4,8 @@ import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { notify, type NotificationType } from '../notifications/notify';
 import { assertBookableWindow } from '../venues/fields.service';
-import { bookingManagerIds, requireVenuePermission, venueRights, type Actor } from '../venues/venues.access';
+import type { Actor } from '../../types/actor';
+import { bookingManagerIds, requireVenuePermission, venueRights } from '../venues/venues.access';
 import type { createBookingSchema, externalBookingSchema, myBookingsSchema, venueBookingsSchema } from './bookings.schemas';
 
 /*
@@ -57,8 +58,11 @@ async function event(tx: Prisma.TransactionClient, bookingId: string, actorId: s
   await tx.bookingEvent.create({ data: { bookingId, actorId, fromStatus: from, toStatus: to, reason: reason ?? undefined } });
 }
 
-/** Active matches that rely on this booking: the organizer and confirmed players are told the venue is no longer confirmed. */
-export async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingId: string, bookingStatus: BookingStatus) {
+/**
+ * When a booking stops being confirmed, active matches that rely on it stay open but are flagged `venueConfirmed: false`
+ * (see matches DTO); the organizer and confirmed players are told. Runs inside the caller's transaction.
+ */
+async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingId: string, bookingStatus: BookingStatus) {
   const matches = await tx.match.findMany({
     where: { bookingId, status: { in: ['OPEN', 'FULL', 'SCHEDULED', 'IN_PROGRESS'] } },
     select: { id: true, title: true, organizerId: true, participants: { where: { status: 'CONFIRMED' }, select: { userId: true } } },
@@ -68,8 +72,31 @@ export async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingI
   }
 }
 
+/**
+ * Used when a match is cancelled with `releaseBooking: true`: cancels the organizer's own IN_APP booking so the venue
+ * slot is freed, and tells the venue managers. Runs inside the match-cancel transaction, so the match and its booking
+ * change together or not at all. EXTERNAL bookings are never cancelled here (nothing to free), and a booking that is
+ * not the caller's (or already finished) is silently left alone.
+ */
+export async function releaseBookingForMatch(tx: Prisma.TransactionClient, actor: Actor, bookingId: string): Promise<void> {
+  const b = await tx.booking.findUnique({ where: { id: bookingId }, include: { field: { select: { venueId: true } } } });
+  if (!b || b.source !== 'IN_APP' || !['PENDING', 'CONFIRMED'].includes(b.status)) return;
+  if (b.createdById !== actor.userId && actor.role !== 'ADMIN') return;
+  await tx.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: 'match cancelled' } });
+  await event(tx, bookingId, actor.userId, b.status, 'CANCELLED', 'match cancelled');
+  const managers = (await bookingManagerIds(b.field!.venueId, tx)).filter((u) => u !== actor.userId);
+  await notify(tx, managers, 'BOOKING_CANCELLED', { bookingId, byVenue: false, reason: 'match cancelled', startAt: b.startAt.toISOString() }, { type: 'booking', id: bookingId });
+}
+
 // ───────────────────────── requester side ─────────────────────────
 
+/**
+ * A player / organizer asks for a slot. Creates a PENDING booking that holds the slot for 2 hours.
+ * Checked here (needs the weekly schedule and the venue time zone): the field is bookable, the start is in the future,
+ * and the window sits inside opening hours on a slot boundary. Checked by the DATABASE (race-proof): overlaps with
+ * PENDING / CONFIRMED bookings, blocked time, the 2h hold, and the 3-pending-requests-per-user cap.
+ * The price is snapshotted from the hourly rate, so later price changes never touch an existing booking.
+ */
 export async function createBooking(actor: Actor, input: z.infer<typeof createBookingSchema>) {
   const field = await prisma.venueField.findUnique({ where: { id: input.venueFieldId }, include: { venue: true, openingHours: true } });
   if (!field || !field.isActive || field.venue.status !== 'ACTIVE') throw new AppError(404, 'FIELD_NOT_FOUND', 'Field not found');
@@ -97,6 +124,10 @@ export async function createBooking(actor: Actor, input: z.infer<typeof createBo
   return { booking: dto(booking) };
 }
 
+/**
+ * Records a booking made outside the app (phone, in person, another app). It is a self-reported snapshot:
+ * CONFIRMED immediately, never reserves a registered field, and is shown as "reported by the organizer".
+ */
 export async function createExternalBooking(actor: Actor, input: z.infer<typeof externalBookingSchema>) {
   const b = await prisma.$transaction(async (tx) => {
     const created = await tx.booking.create({
@@ -122,6 +153,7 @@ export async function createExternalBooking(actor: Actor, input: z.infer<typeof 
   return { booking: dto(b) };
 }
 
+/** The caller's own bookings, optionally filtered by status and upcoming / past; pages with `hasMore` (no total count). */
 export async function myBookings(actor: Actor, q: z.infer<typeof myBookingsSchema>) {
   const now = new Date();
   const where: Prisma.BookingWhereInput = {
@@ -133,6 +165,10 @@ export async function myBookings(actor: Actor, q: z.infer<typeof myBookingsSchem
   return { bookings: rows.slice(0, q.pageSize).map(dto), page: q.page, pageSize: q.pageSize, hasMore: rows.length > q.pageSize };
 }
 
+/**
+ * One booking, visible to its requester and to venue staff who manage bookings.
+ * Anyone else gets 404 (not 403), so booking ids reveal nothing.
+ */
 export async function getBooking(actor: Actor, id: string) {
   const b = await load(id);
   const notFound = new AppError(404, 'BOOKING_NOT_FOUND', 'Booking not found');
@@ -144,6 +180,11 @@ export async function getBooking(actor: Actor, id: string) {
   return { booking: dto(b) };
 }
 
+/**
+ * Cancels a PENDING or CONFIRMED booking. The requester may cancel their own (not after a CONFIRMED booking started).
+ * Venue staff may cancel only CONFIRMED bookings (a pending request must be rejected instead, so the requester gets
+ * a proper answer). Frees the slot, notifies the other side, and flags matches that relied on it.
+ */
 export async function cancelBooking(actor: Actor, id: string, reason?: string | null) {
   const b = await load(id);
   const isRequester = b.createdById === actor.userId;
@@ -173,6 +214,7 @@ export async function cancelBooking(actor: Actor, id: string, reason?: string | 
 
 // ───────────────────────── venue side ─────────────────────────
 
+/** The venue's booking inbox (requires MANAGE_BOOKINGS on that venue), filterable by status and start time. */
 export async function venueBookings(actor: Actor, venueId: string, q: z.infer<typeof venueBookingsSchema>) {
   await requireVenuePermission(actor, venueId, 'MANAGE_BOOKINGS');
   const where: Prisma.BookingWhereInput = {
@@ -184,6 +226,11 @@ export async function venueBookings(actor: Actor, venueId: string, q: z.infer<ty
   return { bookings: rows.slice(0, q.pageSize).map(dto), page: q.page, pageSize: q.pageSize, hasMore: rows.length > q.pageSize };
 }
 
+/**
+ * Staff answer to a PENDING in-app request. Rules: caller needs MANAGE_BOOKINGS (else 404), and cannot answer
+ * their own request (another staff member must). The DB trigger refuses a confirmation after the 2h hold expired
+ * (using the database clock) and lets a request leave PENDING exactly once, so double answers cannot happen.
+ */
 async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTED', reason?: string | null) {
   const b = await load(id);
   if (!b.field || b.source !== 'IN_APP') throw new AppError(400, 'NOT_DECIDABLE', 'Only in-app booking requests need a decision');
@@ -202,5 +249,7 @@ async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTE
   return { booking: dto(await load(id)) };
 }
 
+/** Staff confirm a pending in-app request (see `decide` for the rules). */
 export const confirmBooking = (actor: Actor, id: string) => decide(actor, id, 'CONFIRMED');
+/** Staff reject a pending in-app request, with an optional reason shown to the requester. The slot is freed at once. */
 export const rejectBooking = (actor: Actor, id: string, reason?: string | null) => decide(actor, id, 'REJECTED', reason);

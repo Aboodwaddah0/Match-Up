@@ -1,8 +1,11 @@
-import { z } from 'zod';
+import type { z } from 'zod';
+import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
-import { loadViewableMatch, type Actor } from '../matches/matches.service';
+import type { Actor } from '../../types/actor';
+import { loadViewableMatch } from '../matches/matches.service';
 import { notify } from '../notifications/notify';
+import type { createReviewSchema, listReviewsSchema } from './reviews.schemas';
 
 /*
  * Reviews (D-reviews): only players who ATTENDED a COMPLETED match review each other, once per pair,
@@ -11,29 +14,17 @@ import { notify } from '../notifications/notify';
  * "Attendance / reliability" is NOT a reviewer score: it is derived from organizer-confirmed attendance.
  */
 
-const score = z.number().int().min(1).max(5);
-export const createReviewSchema = z.object({
-  reviewedId: z.uuid(),
-  sportsmanshipScore: score,
-  skillScore: score,
-  reliabilityScore: score,
-  comment: z.string().trim().max(500).nullish(),
-});
-export const listReviewsSchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(50).default(20),
-});
-
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-async function blockedBetween(a: string, b: string): Promise<boolean> {
-  return (await prisma.blockedUser.count({ where: { OR: [{ blockerId: a, blockedId: b }, { blockerId: b, blockedId: a }] } })) > 0;
-}
-
+/**
+ * Reviews another player of a COMPLETED match. The database enforces who may review (both ATTENDED, 7-day window,
+ * once per pair) so these rules hold under races; this layer adds the block check and keeps the rating cache in step,
+ * all in one transaction. The notification to the reviewed player never carries the scores.
+ */
 export async function createReview(actor: Actor, matchId: string, input: z.infer<typeof createReviewSchema>) {
   await loadViewableMatch(matchId, actor);
   if (input.reviewedId === actor.userId) throw new AppError(400, 'INVALID_TARGET', 'You cannot review yourself');
-  if (await blockedBetween(actor.userId, input.reviewedId)) throw new AppError(403, 'NOT_ALLOWED', 'You cannot review this player');
+  if (await areBlocked(actor.userId, input.reviewedId)) throw new AppError(403, 'NOT_ALLOWED', 'You cannot review this player');
 
   const review = await prisma.$transaction(async (tx) => {
     // DB trigger: match COMPLETED, within the review window, both ATTENDED; unique (match, reviewer, reviewed).
@@ -94,7 +85,7 @@ export async function pendingReviews(actor: Actor, matchId: string) {
 
 /** Public: reviews a player received, with category averages. Reviews by users the viewer has a block with are left out. */
 export async function listPlayerReviews(actor: Actor, userId: string, q: z.infer<typeof listReviewsSchema>) {
-  if (!(await prisma.user.findUnique({ where: { id: userId }, select: { id: true } })) || (await blockedBetween(actor.userId, userId))) {
+  if (!(await prisma.user.findUnique({ where: { id: userId }, select: { id: true } })) || (await areBlocked(actor.userId, userId))) {
     throw new AppError(404, 'PLAYER_NOT_FOUND', 'Player not found');
   }
   const where = { reviewedId: userId };

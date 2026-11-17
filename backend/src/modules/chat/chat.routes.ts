@@ -1,36 +1,20 @@
 import { Router } from 'express';
-import { z } from 'zod';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
-import * as chat from './chat.service';
-
-const actor = (req: { auth?: { userId: string; role: 'USER' | 'ADMIN' } }) => ({ userId: req.auth!.userId, role: req.auth!.role });
-const idParams = z.object({ id: z.uuid() });
+import { validate } from '../../middleware/validate';
+import * as chat from './chat.controller';
+import { directChatSchema, idParams, listMessagesSchema, sendMessageSchema } from './chat.schemas';
 
 export const chatRouter = Router();
 chatRouter.use(authenticate);
 
-chatRouter.get('/', async (req, res) => {
-  res.json(await chat.listChats(actor(req)));
-});
+chatRouter.get('/', chat.inbox);
 
-// Open (get-or-create) a conversation; returns its id. Non-members get 404.
-chatRouter.post('/match/:id', async (req, res) => {
-  res.json(await chat.openMatchChat(actor(req), idParams.parse(req.params).id));
-});
-chatRouter.post('/team/:id', async (req, res) => {
-  res.json(await chat.openTeamChat(actor(req), idParams.parse(req.params).id));
-});
-chatRouter.post('/direct', requireVerifiedEmail, async (req, res) => {
-  res.json(await chat.openDirectChat(actor(req), z.object({ userId: z.uuid() }).parse(req.body).userId));
-});
+// open (get-or-create) a conversation
+chatRouter.post('/match/:id', validate({ params: idParams }), chat.openMatchChat);
+chatRouter.post('/team/:id', validate({ params: idParams }), chat.openTeamChat);
+chatRouter.post('/direct', requireVerifiedEmail, validate({ body: directChatSchema }), chat.openDirectChat);
 
-chatRouter.get('/:id/messages', async (req, res) => {
-  res.json(await chat.listMessages(actor(req), idParams.parse(req.params).id, chat.listMessagesSchema.parse(req.query)));
-});
-chatRouter.post('/:id/messages', requireVerifiedEmail, async (req, res) => {
-  res.status(201).json(await chat.sendMessage(actor(req), idParams.parse(req.params).id, chat.sendMessageSchema.parse(req.body).body));
-});
-chatRouter.post('/:id/read', async (req, res) => {
-  await chat.markRead(actor(req), idParams.parse(req.params).id);
-  res.status(204).end();
-});
+// messages
+chatRouter.get('/:id/messages', validate({ params: idParams, query: listMessagesSchema }), chat.listMessages);
+chatRouter.post('/:id/messages', requireVerifiedEmail, validate({ params: idParams, body: sendMessageSchema }), chat.sendMessage);
+chatRouter.post('/:id/read', validate({ params: idParams }), chat.markRead);

@@ -1,10 +1,12 @@
 import type { z } from 'zod';
+import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { withDeadlockRetry } from '../../lib/db-errors';
 import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
 import type { attendanceSchema } from './matches.schemas';
-import { getMatch, hasScheduleConflict, loadManageableMatch, loadViewableMatch, type Actor } from './matches.service';
+import type { Actor } from '../../types/actor';
+import { getMatch, hasScheduleConflict, loadManageableMatch, loadViewableMatch } from './matches.service';
 
 /*
  * Requests (the ASK, pending) and participants (CONFIRMED members) are different tables.
@@ -16,6 +18,11 @@ const userSummary = { select: { id: true, fullName: true, avatarUrl: true } } as
 
 // ───────────────────────── join requests ─────────────────────────
 
+/**
+ * Asks to join a match. This is a REQUEST, not a participation: it never takes a spot (D3). The DB trigger enforces the
+ * rules atomically (open match, not started, not your own match, invited when private, not blocked, no duplicate pending).
+ * A time clash with another CONFIRMED match is returned as a warning only (`scheduleConflict`).
+ */
 export async function createRequest(actor: Actor, matchId: string, message?: string | null) {
   const m = await loadViewableMatch(matchId, actor);
   const profile = await prisma.playerProfile.findUnique({ where: { userId: actor.userId }, select: { id: true } });
@@ -32,6 +39,7 @@ export async function createRequest(actor: Actor, matchId: string, message?: str
   return { request: { id: request.id, status: request.status, createdAt: request.createdAt }, scheduleConflict };
 }
 
+/** The requester withdraws their own pending request (404 if there is none). */
 export async function withdrawRequest(actor: Actor, matchId: string): Promise<void> {
   const res = await prisma.matchRequest.updateMany({
     where: { matchId, userId: actor.userId, status: 'PENDING' },
@@ -40,6 +48,7 @@ export async function withdrawRequest(actor: Actor, matchId: string): Promise<vo
   if (res.count === 0) throw new AppError(404, 'REQUEST_NOT_FOUND', 'You have no pending request for this match');
 }
 
+/** Organizer view of pending requests, each flagged when the player already has a conflicting confirmed match (the other match is never revealed). */
 export async function listPendingRequests(actor: Actor, matchId: string) {
   const m = await loadManageableMatch(matchId, actor);
   const requests = await prisma.matchRequest.findMany({
@@ -77,6 +86,13 @@ export async function listPendingRequests(actor: Actor, matchId: string) {
   };
 }
 
+/**
+ * The organizer accepts or rejects a pending request. Accepting turns the ask into a CONFIRMED participant.
+ * Concurrency: the participant trigger takes a row lock on the match, so capacity (and OPEN -> FULL) is checked under
+ * the lock and two simultaneous accepts cannot overbook. The overlap exclusion constraint stops the same player being
+ * confirmed in two overlapping matches; when two organizers do that at once, Postgres aborts one transaction as a
+ * deadlock victim, so the whole transaction is retried (see withDeadlockRetry) and ends in a clean 409 SCHEDULE_CONFLICT.
+ */
 export async function decideRequest(actor: Actor, matchId: string, requestId: string, decision: 'accept' | 'reject') {
   const m = await loadManageableMatch(matchId, actor);
   const request = await prisma.matchRequest.findFirst({ where: { id: requestId, matchId } });
@@ -109,6 +125,7 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
 
 // ───────────────────────── participants ─────────────────────────
 
+/** Confirmed players of a match. Attendance is shown to the organizer and admins only. */
 export async function listParticipants(actor: Actor, matchId: string) {
   const m = await loadViewableMatch(matchId, actor);
   const showAttendance = m.organizerId === actor.userId || actor.role === 'ADMIN';
@@ -147,6 +164,7 @@ export async function leaveMatch(actor: Actor, matchId: string) {
   });
 }
 
+/** The organizer removes a confirmed player before the start: status REMOVED, not a late cancellation, no penalty for the player. */
 export async function removeParticipant(actor: Actor, matchId: string, userId: string): Promise<void> {
   const m = await loadManageableMatch(matchId, actor);
   await prisma.$transaction(async (tx) => {
@@ -169,16 +187,15 @@ export async function setAttendance(actor: Actor, matchId: string, userId: strin
 
 // ───────────────────────── invitations (private matches, D8) ─────────────────────────
 
+/** The organizer invites a user (needed for PRIVATE matches). Re-inviting refreshes the pending invitation; blocked users look like non-existent ones. */
 export async function inviteUser(actor: Actor, matchId: string, inviteeId: string): Promise<void> {
   const m = await loadManageableMatch(matchId, actor);
   if (!['OPEN', 'FULL'].includes(m.status)) throw new AppError(409, 'INVALID_STATE', 'This match no longer takes invitations');
   if (inviteeId === m.organizerId) throw new AppError(400, 'INVALID_INVITEE', 'You organize this match');
 
   const invitee = await prisma.user.findUnique({ where: { id: inviteeId }, select: { id: true, status: true } });
-  const blocked = await prisma.blockedUser.count({
-    where: { OR: [{ blockerId: actor.userId, blockedId: inviteeId }, { blockerId: inviteeId, blockedId: actor.userId }] },
-  });
-  if (!invitee || invitee.status !== 'ACTIVE' || blocked > 0) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+  const blocked = await areBlocked(actor.userId, inviteeId);
+  if (!invitee || invitee.status !== 'ACTIVE' || blocked) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
 
   await prisma.$transaction(async (tx) => {
     await tx.matchInvitation.upsert({

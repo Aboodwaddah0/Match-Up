@@ -7,6 +7,7 @@ import { accessTokenTtlSeconds, signAccessToken } from '../../lib/jwt';
 import { sendEmail } from '../../lib/mailer';
 import { burnPasswordCheck, hashPassword, verifyPassword } from '../../lib/password';
 import { prisma } from '../../lib/prisma';
+import { toPublicUser } from '../users/users.service';
 import { resetPasswordMessage, verifyEmailMessage } from './auth.emails';
 
 const HOUR = 3_600_000;
@@ -15,20 +16,6 @@ const RESET_TTL_MS = 1 * HOUR;
 const REFRESH_TTL_MS = env.REFRESH_TOKEN_TTL_DAYS * 24 * HOUR;
 
 type Tx = Prisma.TransactionClient;
-
-export function toPublicUser(user: User) {
-  return {
-    id: user.id,
-    email: user.email,
-    fullName: user.fullName,
-    avatarUrl: user.avatarUrl,
-    locale: user.locale,
-    timezone: user.timezone,
-    platformRole: user.platformRole,
-    emailVerified: user.emailVerifiedAt !== null,
-    createdAt: user.createdAt,
-  };
-}
 
 export interface Session {
   accessToken: string;
@@ -109,6 +96,7 @@ export async function register(input: { email: string; password: string; fullNam
   return toPublicUser(user);
 }
 
+/** Consumes a single-use e-mail verification token and marks the address verified. */
 export async function verifyEmail(rawToken: string): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const userId = await consumeUserToken(tx, rawToken, 'EMAIL_VERIFY');
@@ -116,12 +104,18 @@ export async function verifyEmail(rawToken: string): Promise<void> {
   });
 }
 
+/** Sends a new verification link (only the newest link works). 409 when the address is already verified. */
 export async function resendVerification(userId: string): Promise<void> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   if (user.emailVerifiedAt) throw new AppError(409, 'ALREADY_VERIFIED', 'E-mail is already verified');
   await sendVerificationEmail(user);
 }
 
+/**
+ * Checks e-mail + password and starts a session.
+ * Security: an unknown e-mail still burns a password-hash check, so timing does not reveal whether an account exists,
+ * and the account state (suspended) is revealed only after the correct password.
+ */
 export async function login(email: string, password: string) {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) {
@@ -176,6 +170,7 @@ export async function logout(rawToken: string): Promise<void> {
   await prisma.refreshToken.updateMany({ where: { familyId: row.familyId, revokedAt: null }, data: { revokedAt: new Date() } });
 }
 
+/** Revokes every refresh token of the user (all devices). */
 export async function logoutAll(userId: string): Promise<void> {
   await prisma.$transaction((tx) => revokeUserSessions(tx, userId));
 }
@@ -188,6 +183,10 @@ export async function forgotPassword(email: string): Promise<void> {
   await sendEmail(resetPasswordMessage(user.email, user.locale, `${env.APP_URL}/reset-password?token=${raw}`));
 }
 
+/**
+ * Sets a new password from a reset link. One transaction: consume the single-use token, change the password, mark the
+ * e-mail verified (the user proved the inbox is theirs), and revoke all sessions so every device must log in again.
+ */
 export async function resetPassword(rawToken: string, newPassword: string): Promise<void> {
   const passwordHash = await hashPassword(newPassword);
   await prisma.$transaction(async (tx) => {
@@ -199,6 +198,7 @@ export async function resetPassword(rawToken: string, newPassword: string): Prom
   });
 }
 
+/** Changes the password after checking the current one; revokes all other sessions and returns a fresh session for this device. */
 export async function changePassword(userId: string, currentPassword: string, newPassword: string): Promise<Session> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   if (!(await verifyPassword(user.passwordHash, currentPassword))) {

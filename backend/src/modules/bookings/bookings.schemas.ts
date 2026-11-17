@@ -41,3 +41,4 @@ export const venueBookingsSchema = z.object({ status: status.optional(), from: i
 
 export const reasonSchema = z.object({ reason: z.string().trim().max(300).nullish() });
 export const bookingIdParams = z.object({ bookingId: z.uuid() });
+export const venueIdParams = z.object({ venueId: z.uuid() });

@@ -3,7 +3,8 @@ import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
 import { withDeadlockRetry } from '../../lib/db-errors';
 import { prisma } from '../../lib/prisma';
-import { getMatch, type Actor } from '../matches/matches.service';
+import type { Actor } from '../../types/actor';
+import { getMatch } from '../matches/matches.service';
 import { notify } from '../notifications/notify';
 import type { challengesQuerySchema, createChallengeSchema } from './teams.schemas';
 import { myRole, requireStaff, staffIds } from './teams.service';
@@ -84,6 +85,7 @@ async function challengeDto(id: string) {
   };
 }
 
+/** Incoming or outgoing challenges of a team, visible to its members. */
 export async function listChallenges(actor: Actor, teamId: string, q: z.infer<typeof challengesQuerySchema>) {
   if (!(await myRole(teamId, actor.userId))) throw new AppError(403, 'FORBIDDEN', 'Only team members can see the team\'s challenges');
   const rows = await prisma.teamChallenge.findMany({
@@ -107,6 +109,12 @@ async function loadPending(challengeId: string) {
   return c;
 }
 
+/**
+ * The challenged team's staff accept. In ONE transaction: claim the challenge atomically (so a concurrent accept / reject /
+ * cancel yields exactly one winner), create the TEAM_CHALLENGE match (SCHEDULED) with its two sides, link it back, and
+ * notify the challenger. The DB checks at COMMIT that the match really has two sides. The challenger's captain becomes
+ * the organizer because a match has a single organizer.
+ */
 export async function acceptChallenge(actor: Actor, challengeId: string) {
   const c = await loadPending(challengeId);
   await requireStaff(c.challengedTeamId, actor);
@@ -152,6 +160,7 @@ export async function acceptChallenge(actor: Actor, challengeId: string) {
   return { challenge: await challengeDto(challengeId), match: await getMatch(actor, matchId) };
 }
 
+/** The challenged team's staff reject a pending challenge (final). */
 export async function rejectChallenge(actor: Actor, challengeId: string) {
   const c = await loadPending(challengeId);
   await requireStaff(c.challengedTeamId, actor);
@@ -164,6 +173,7 @@ export async function rejectChallenge(actor: Actor, challengeId: string) {
   return { challenge: await challengeDto(challengeId) };
 }
 
+/** The challenger's staff withdraw a pending challenge (final). */
 export async function cancelChallenge(actor: Actor, challengeId: string) {
   const c = await loadPending(challengeId);
   await requireStaff(c.challengerTeamId, actor);
@@ -200,6 +210,7 @@ export async function addToRoster(actor: Actor, teamId: string, matchId: string,
   return getRoster(actor, teamId, matchId);
 }
 
+/** Staff remove a player from their own side's roster before the start (status REMOVED, no penalty). */
 export async function removeFromRoster(actor: Actor, teamId: string, matchId: string, userId: string) {
   await requireStaff(teamId, actor);
   const side = await loadSide(teamId, matchId);
@@ -212,6 +223,7 @@ export async function removeFromRoster(actor: Actor, teamId: string, matchId: st
   return getRoster(actor, teamId, matchId);
 }
 
+/** The confirmed players of one side and how many the format requires; visible to that team's members. */
 export async function getRoster(actor: Actor, teamId: string, matchId: string) {
   if (!(await myRole(teamId, actor.userId)) && actor.role !== 'ADMIN') throw new AppError(403, 'FORBIDDEN', 'Only team members can see the roster');
   const side = await loadSide(teamId, matchId);

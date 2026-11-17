@@ -86,6 +86,7 @@ export async function expireStaleTeamOffers(): Promise<number> {
   return challenges.length + invites.count;
 }
 
+/** Runs every sweeper once, in order; each is idempotent, so running them twice or on two instances is safe. */
 export async function runLifecycleJobs(): Promise<{ started: number; closed: number; expired: number; completed: number; offers: number }> {
   const started = await startDueMatches();
   const closed = await closeUnconfirmedMatches();
@@ -95,6 +96,7 @@ export async function runLifecycleJobs(): Promise<{ started: number; closed: num
   return { started, closed, expired, completed, offers };
 }
 
+/** Runs the sweepers every minute without overlapping runs; returns a function that stops the schedule (used on shutdown). */
 export function scheduleLifecycleJobs(intervalMs = 60_000): () => void {
   let running = false;
   const tick = async () => {

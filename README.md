@@ -54,15 +54,31 @@ npm run dev                           # http://localhost:3000
 docker-compose.yml        db, migrate, api, adminer
 backend/
   Dockerfile              targets: dev (hot reload) and prod (compiled, non-root)
-  prisma/                 schema, migrations, DB tests
+  prisma/                 schema, migrations (constraints + triggers), DB tests
   src/
+    app.ts  server.ts     app wiring (routers mounted in app.ts), HTTP + Socket.IO start
     config/env.ts         validated environment (zod)
-    lib/                  prisma client, logger
-    middleware/           error handling
-    modules/              one folder per business module (health so far)
-    app.ts  server.ts
-  tests/
+    lib/                  shared utilities: prisma, logger, errors + db-errors (deadlock retry), jwt, mailer, time, blocks
+    middleware/           authenticate (+ actorOf), validate (zod), rate-limit, error-handler
+    types/                shared types (Actor, Express request typing)
+    jobs/                 time-driven sweepers (match start / close, booking and offer expiry)
+    modules/<name>/       one folder per business module (see below)
+  tests/                  integration tests against a real Postgres database
 ```
+
+### How a module is organized
+
+Each layer has one job. Files exist only when the module needs them (a tiny module may have just routes + controller + service).
+
+| File | Responsibility | Must NOT contain |
+|---|---|---|
+| `<name>.routes.ts` | HTTP endpoints; attaches `authenticate`, role / verified-e-mail guards, rate limiters and `validate(...)`; connects each endpoint to a controller function | logic, queries |
+| `<name>.controller.ts` | reads validated input (`valid(req, ...)`) and the caller (`actorOf(req)`), calls the service, sets the HTTP status and response | Prisma, business rules |
+| `<name>.service.ts` | business rules, Prisma queries, transactions, ownership and permission checks; takes plain arguments (`actor`, ids, validated input) | Express `req` / `res` |
+| `<name>.schemas.ts` | Zod validation of params, query and body | logic |
+
+Shared pieces live outside the modules: `Actor` and request typing in `types/`, `authenticate` / `actorOf` / `validate` in `middleware/`, and cross-cutting helpers (`areBlocked`, `withDeadlockRetry`, time zones) in `lib/`.
+Dependencies between modules go one way and never in a circle: `matches -> bookings -> venues`, `teams / reviews -> matches`, `safety -> chat`, `auth -> users`, and every module that sends notifications -> `notifications`.
 
 ## Auth API (`/api/v1`)
 

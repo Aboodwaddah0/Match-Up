@@ -3,7 +3,8 @@ import type { z } from 'zod';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { formatHm, timeColumnToMinutes } from '../../lib/time';
-import { DEFAULT_PERMISSIONS, requireVenuePermission, venueRights, type Actor } from './venues.access';
+import type { Actor } from '../../types/actor';
+import { DEFAULT_PERMISSIONS, requireVenuePermission, venueRights } from './venues.access';
 import type { createVenueSchema, staffSchema, updateVenueSchema, venueSearchSchema } from './venues.schemas';
 
 const venueInclude = {
@@ -47,6 +48,7 @@ function venueDto(v: VenueRow, viewer?: { canSeeInactive: boolean; distanceKm?: 
   };
 }
 
+/** Loads a venue with images and fields; 404 if it does not exist. */
 async function load(id: string): Promise<VenueRow> {
   const v = await prisma.venue.findUnique({ where: { id }, include: venueInclude });
   if (!v) throw new AppError(404, 'VENUE_NOT_FOUND', 'Venue not found');
@@ -57,12 +59,17 @@ async function assertCity(cityId: string) {
   if (!(await prisma.city.findUnique({ where: { id: cityId } }))) throw new AppError(400, 'INVALID_CITY', 'Unknown city');
 }
 
+/** Registers a venue; the caller becomes its owner (Venue.ownerId) and gets full rights on it. */
 export async function createVenue(actor: Actor, input: z.infer<typeof createVenueSchema>) {
   await assertCity(input.cityId);
   const v = await prisma.venue.create({ data: { ...input, ownerId: actor.userId }, include: venueInclude });
   return venueDto(v, { canSeeInactive: true });
 }
 
+/**
+ * Venue details. A venue that is not ACTIVE (inactive / suspended) is visible only to its owner, its staff and admins;
+ * everyone else gets 404. `myAccess` tells staff what they may do here (permissions are per venue, D2).
+ */
 export async function getVenue(actor: Actor, id: string) {
   const v = await load(id);
   const rights = await venueRights(actor, id);
@@ -76,6 +83,7 @@ export async function getVenue(actor: Actor, id: string) {
   };
 }
 
+/** Edits the venue's details (requires EDIT_VENUE on this venue). */
 export async function updateVenue(actor: Actor, id: string, input: z.infer<typeof updateVenueSchema>) {
   await requireVenuePermission(actor, id, 'EDIT_VENUE');
   if (input.cityId) await assertCity(input.cityId);
@@ -93,6 +101,11 @@ export async function myVenues(actor: Actor) {
   return { venues: rows.map((v) => ({ ...venueDto(v, { canSeeInactive: true }), owner: v.ownerId === actor.userId })) };
 }
 
+/**
+ * Searches ACTIVE venues by name, city, field format and distance. Distance uses the earthdistance extension:
+ * `earth_box` first narrows candidates with an index-friendly box, then `earth_distance` applies the exact radius.
+ * The name filter escapes LIKE wildcards so user input is matched literally.
+ */
 export async function searchVenues(q: z.infer<typeof venueSearchSchema>) {
   const conds: Prisma.Sql[] = [Prisma.sql`v.status = 'ACTIVE'`];
   if (q.cityId) conds.push(Prisma.sql`v.city_id = ${q.cityId}::uuid`);
@@ -127,6 +140,7 @@ export async function searchVenues(q: z.infer<typeof venueSearchSchema>) {
 
 // ───────────────────────── staff (per-venue permissions, D2) ─────────────────────────
 
+/** Adds (or updates) a staff member with a role and permissions; defaults come from the role. The owner cannot be added as staff. */
 export async function addStaff(actor: Actor, venueId: string, input: z.infer<typeof staffSchema>) {
   const { venue } = await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
   if (input.userId === venue.ownerId) throw new AppError(400, 'INVALID_STAFF', 'The owner already has full access');
@@ -142,12 +156,14 @@ export async function addStaff(actor: Actor, venueId: string, input: z.infer<typ
   return { staff: { userId: row.userId, role: row.role, permissions: row.permissions } };
 }
 
+/** Staff of one venue (requires MANAGE_STAFF). */
 export async function listStaff(actor: Actor, venueId: string) {
   await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
   const rows = await prisma.venueStaff.findMany({ where: { venueId }, include: { user: { select: { id: true, fullName: true, avatarUrl: true } } } });
   return { staff: rows.map((r) => ({ userId: r.userId, fullName: r.user.fullName, avatarUrl: r.user.avatarUrl, role: r.role, permissions: r.permissions })) };
 }
 
+/** Removes a staff member from this venue only (permissions are never global). */
 export async function removeStaff(actor: Actor, venueId: string, userId: string): Promise<void> {
   await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
   const res = await prisma.venueStaff.deleteMany({ where: { venueId, userId } });
@@ -156,6 +172,7 @@ export async function removeStaff(actor: Actor, venueId: string, userId: string)
 
 // ───────────────────────── images ─────────────────────────
 
+/** Adds an image URL (max 10 per venue, appended last). Upload comes later, so these are https links. */
 export async function addImage(actor: Actor, venueId: string, url: string) {
   await requireVenuePermission(actor, venueId, 'EDIT_VENUE');
   const count = await prisma.venueImage.count({ where: { venueId } });
@@ -164,6 +181,7 @@ export async function addImage(actor: Actor, venueId: string, url: string) {
   return { image: { id: image.id, url: image.url } };
 }
 
+/** Removes one image of this venue. */
 export async function removeImage(actor: Actor, venueId: string, imageId: string): Promise<void> {
   await requireVenuePermission(actor, venueId, 'EDIT_VENUE');
   const res = await prisma.venueImage.deleteMany({ where: { id: imageId, venueId } });

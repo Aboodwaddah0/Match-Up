@@ -1,8 +1,10 @@
 import type { Conversation, Prisma } from '@prisma/client';
-import { z } from 'zod';
+import type { z } from 'zod';
+import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
-import type { Actor } from '../matches/matches.service';
+import type { Actor } from '../../types/actor';
+import type { listMessagesSchema } from './chat.schemas';
 import { emitToUsers } from './realtime';
 
 /*
@@ -14,20 +16,10 @@ import { emitToUsers } from './realtime';
  * A blocked pair loses their DM, and in group chats each side stops seeing the other's messages.
  */
 
-export const sendMessageSchema = z.object({ body: z.string().trim().min(1).max(2000) });
-export const listMessagesSchema = z.object({
-  before: z.uuid().optional(), // message id: return messages older than this one
-  limit: z.coerce.number().int().min(1).max(100).default(30),
-});
-
 const RATE_LIMIT_PER_MINUTE = 20;
 const READ_ONLY_AFTER_MATCH_DAYS = 7;
 const DAY = 86_400_000;
 const userSummary = { select: { id: true, fullName: true, avatarUrl: true } } as const;
-
-async function blockedBetween(a: string, b: string): Promise<boolean> {
-  return (await prisma.blockedUser.count({ where: { OR: [{ blockerId: a, blockedId: b }, { blockerId: b, blockedId: a }] } })) > 0;
-}
 
 /** userIds that currently belong to the conversation. */
 async function memberIds(c: Conversation): Promise<string[]> {
@@ -61,7 +53,7 @@ async function loadAccess(conversationId: string, userId: string): Promise<Acces
   let canWrite = true;
   if (conversation.type === 'DIRECT') {
     const other = members.find((m) => m !== userId);
-    if (other && (await blockedBetween(userId, other))) throw notFound;
+    if (other && (await areBlocked(userId, other))) throw notFound;
   } else if (conversation.type === 'MATCH') {
     const m = await prisma.match.findUniqueOrThrow({ where: { id: conversation.matchId! }, select: { status: true, endAt: true } });
     canWrite = m.status !== 'CANCELLED' && Date.now() < m.endAt.getTime() + READ_ONLY_AFTER_MATCH_DAYS * DAY;
@@ -78,6 +70,7 @@ export async function openMatchChat(actor: Actor, matchId: string) {
   return { conversationId: conv.id };
 }
 
+/** Get-or-create the team chat. Only current members get an id (404 otherwise). `upsert` on the unique team id makes it race-safe. */
 export async function openTeamChat(actor: Actor, teamId: string) {
   const isMember = await prisma.teamMember.count({ where: { teamId, userId: actor.userId } });
   if (!isMember) throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
@@ -95,10 +88,15 @@ async function shareContext(a: string, b: string): Promise<boolean> {
   return matches + teams > 0;
 }
 
+/**
+ * Get-or-create the direct chat between the caller and another user. An existing DM is always reachable (unless blocked);
+ * a NEW one needs a shared match or team, to prevent unsolicited messages from strangers. Creation takes an advisory
+ * lock on the sorted user pair, so two people starting a chat at the same moment end up in ONE conversation.
+ */
 export async function openDirectChat(actor: Actor, otherId: string) {
   if (otherId === actor.userId) throw new AppError(400, 'INVALID_TARGET', 'You cannot message yourself');
   const other = await prisma.user.findUnique({ where: { id: otherId }, select: { status: true } });
-  if (!other || other.status !== 'ACTIVE' || (await blockedBetween(actor.userId, otherId))) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+  if (!other || other.status !== 'ACTIVE' || (await areBlocked(actor.userId, otherId))) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
 
   const existing = await prisma.conversation.findFirst({
     where: { type: 'DIRECT', AND: [{ participants: { some: { userId: actor.userId } } }, { participants: { some: { userId: otherId } } }] },
@@ -151,6 +149,7 @@ export async function sendMessage(actor: Actor, conversationId: string, body: st
   return { message: dto };
 }
 
+/** Message history, newest first, paged with a message-id cursor (`before`). Messages from users with a block are hidden. */
 export async function listMessages(actor: Actor, conversationId: string, q: z.infer<typeof listMessagesSchema>) {
   const { canWrite } = await loadAccess(conversationId, actor.userId);
   const blocks = await prisma.blockedUser.findMany({ where: { OR: [{ blockerId: actor.userId }, { blockedId: actor.userId }] } });
@@ -176,6 +175,7 @@ export async function listMessages(actor: Actor, conversationId: string, q: z.in
   };
 }
 
+/** Marks the conversation read for the caller (drives unread counts). */
 export async function markRead(actor: Actor, conversationId: string): Promise<void> {
   await loadAccess(conversationId, actor.userId);
   const now = new Date();

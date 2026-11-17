@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { AppError } from '../lib/errors';
 import { verifyAccessToken } from '../lib/jwt';
 import { prisma } from '../lib/prisma';
+import type { Actor } from '../types/actor';
 
 /**
  * Requires `Authorization: Bearer <access token>`.
@@ -38,4 +39,9 @@ export function requireVerifiedEmail(req: Request, _res: Response, next: NextFun
 export function requireAdmin(req: Request, _res: Response, next: NextFunction): void {
   if (req.auth?.role !== 'ADMIN') throw new AppError(403, 'FORBIDDEN', 'Administrator access required');
   next();
+}
+
+/** The caller as the plain object services expect (set by `authenticate`, so call this only on authenticated routes). */
+export function actorOf(req: Request): Actor {
+  return { userId: req.auth!.userId, role: req.auth!.role };
 }

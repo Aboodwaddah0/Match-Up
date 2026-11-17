@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
+import { validate } from '../../middleware/validate';
+import * as matches from './matches.controller';
 import {
   attendanceSchema,
   cancelSchema,
@@ -13,104 +15,35 @@ import {
   searchSchema,
   updateMatchSchema,
 } from './matches.schemas';
-import * as matches from './matches.service';
-import * as participation from './participation.service';
+import * as participation from './participation.controller';
 
+// Ownership checks (organizer / admin) live in the services; the routes only authenticate and validate.
 export const matchesRouter = Router();
 matchesRouter.use(authenticate);
 
-const actor = (req: { auth?: { userId: string; role: 'USER' | 'ADMIN' } }) => ({ userId: req.auth!.userId, role: req.auth!.role });
-
 // ── discovery ──
-matchesRouter.get('/', async (req, res) => {
-  res.json(await matches.searchMatches(actor(req), searchSchema.parse(req.query)));
-});
+matchesRouter.get('/', validate({ query: searchSchema }), matches.search);
+matchesRouter.get('/mine', validate({ query: mineSchema }), matches.mine);
 
-matchesRouter.get('/mine', async (req, res) => {
-  res.json(await matches.myMatches(actor(req), mineSchema.parse(req.query)));
-});
-
-// ── match CRUD ──
-matchesRouter.post('/', requireVerifiedEmail, async (req, res) => {
-  res.status(201).json({ match: await matches.createMatch(actor(req), createMatchSchema.parse(req.body)) });
-});
-
-matchesRouter.get('/:matchId', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  res.json({ match: await matches.getMatch(actor(req), matchId) });
-});
-
-matchesRouter.patch('/:matchId', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  res.json({ match: await matches.updateMatch(actor(req), matchId, updateMatchSchema.parse(req.body)) });
-});
-
-matchesRouter.post('/:matchId/cancel', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  const { reason, releaseBooking } = cancelSchema.parse(req.body ?? {});
-  res.json({ match: await matches.cancelMatch(actor(req), matchId, reason, releaseBooking) });
-});
-
-matchesRouter.post('/:matchId/complete', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  res.json({ match: await matches.completeMatch(actor(req), matchId) });
-});
+// ── match CRUD and lifecycle ──
+matchesRouter.post('/', requireVerifiedEmail, validate({ body: createMatchSchema }), matches.create);
+matchesRouter.get('/:matchId', validate({ params: matchIdParams }), matches.get);
+matchesRouter.patch('/:matchId', validate({ params: matchIdParams, body: updateMatchSchema }), matches.update);
+matchesRouter.post('/:matchId/cancel', validate({ params: matchIdParams, body: cancelSchema, optionalBody: true }), matches.cancel);
+matchesRouter.post('/:matchId/complete', validate({ params: matchIdParams }), matches.complete);
 
 // ── join requests ──
-matchesRouter.post('/:matchId/requests', requireVerifiedEmail, async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  const { message } = createRequestSchema.parse(req.body ?? {});
-  res.status(201).json(await participation.createRequest(actor(req), matchId, message));
-});
-
-matchesRouter.delete('/:matchId/requests/me', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  await participation.withdrawRequest(actor(req), matchId);
-  res.status(204).end();
-});
-
-matchesRouter.get('/:matchId/requests', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  res.json(await participation.listPendingRequests(actor(req), matchId));
-});
-
-matchesRouter.post('/:matchId/requests/:requestId/accept', async (req, res) => {
-  const { matchId, requestId } = requestParams.parse(req.params);
-  res.json(await participation.decideRequest(actor(req), matchId, requestId, 'accept'));
-});
-
-matchesRouter.post('/:matchId/requests/:requestId/reject', async (req, res) => {
-  const { matchId, requestId } = requestParams.parse(req.params);
-  res.json(await participation.decideRequest(actor(req), matchId, requestId, 'reject'));
-});
+matchesRouter.post('/:matchId/requests', requireVerifiedEmail, validate({ params: matchIdParams, body: createRequestSchema, optionalBody: true }), participation.createRequest);
+matchesRouter.delete('/:matchId/requests/me', validate({ params: matchIdParams }), participation.withdrawRequest);
+matchesRouter.get('/:matchId/requests', validate({ params: matchIdParams }), participation.listRequests);
+matchesRouter.post('/:matchId/requests/:requestId/accept', validate({ params: requestParams }), participation.acceptRequest);
+matchesRouter.post('/:matchId/requests/:requestId/reject', validate({ params: requestParams }), participation.rejectRequest);
 
 // ── participants ──
-matchesRouter.get('/:matchId/participants', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  res.json(await participation.listParticipants(actor(req), matchId));
-});
-
-matchesRouter.post('/:matchId/leave', async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  res.json(await participation.leaveMatch(actor(req), matchId));
-});
-
-matchesRouter.delete('/:matchId/participants/:userId', async (req, res) => {
-  const { matchId, userId } = participantParams.parse(req.params);
-  await participation.removeParticipant(actor(req), matchId, userId);
-  res.status(204).end();
-});
-
-matchesRouter.patch('/:matchId/participants/:userId/attendance', async (req, res) => {
-  const { matchId, userId } = participantParams.parse(req.params);
-  const { status } = attendanceSchema.parse(req.body);
-  res.json(await participation.setAttendance(actor(req), matchId, userId, status));
-});
+matchesRouter.get('/:matchId/participants', validate({ params: matchIdParams }), participation.listParticipants);
+matchesRouter.post('/:matchId/leave', validate({ params: matchIdParams }), participation.leave);
+matchesRouter.delete('/:matchId/participants/:userId', validate({ params: participantParams }), participation.removeParticipant);
+matchesRouter.patch('/:matchId/participants/:userId/attendance', validate({ params: participantParams, body: attendanceSchema }), participation.setAttendance);
 
 // ── invitations ──
-matchesRouter.post('/:matchId/invitations', requireVerifiedEmail, async (req, res) => {
-  const { matchId } = matchIdParams.parse(req.params);
-  const { userId } = inviteSchema.parse(req.body);
-  await participation.inviteUser(actor(req), matchId, userId);
-  res.status(201).json({ invited: true });
-});
+matchesRouter.post('/:matchId/invitations', requireVerifiedEmail, validate({ params: matchIdParams, body: inviteSchema }), participation.invite);

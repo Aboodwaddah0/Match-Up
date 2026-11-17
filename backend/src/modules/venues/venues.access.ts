@@ -1,11 +1,7 @@
-import type { Venue, VenuePermission, VenueStaff } from '@prisma/client';
+import type { Prisma, Venue, VenuePermission, VenueStaff } from '@prisma/client';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
-
-export interface Actor {
-  userId: string;
-  role: 'USER' | 'ADMIN';
-}
+import type { Actor } from '../../types/actor';
 
 export interface VenueRights {
   venue: Venue;
@@ -41,9 +37,12 @@ export async function requireVenuePermission(actor: Actor, venueId: string, perm
   return rights;
 }
 
-/** Everyone who should hear about booking requests: the owner plus staff who manage bookings. */
-export async function bookingManagerIds(venueId: string): Promise<string[]> {
-  const venue = await prisma.venue.findUniqueOrThrow({ where: { id: venueId }, select: { ownerId: true } });
-  const staff = await prisma.venueStaff.findMany({ where: { venueId, permissions: { has: 'MANAGE_BOOKINGS' } }, select: { userId: true } });
+/**
+ * Everyone who should hear about booking requests: the owner plus staff who manage bookings.
+ * Pass the transaction client when calling inside a transaction so the read uses the same connection.
+ */
+export async function bookingManagerIds(venueId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<string[]> {
+  const venue = await db.venue.findUniqueOrThrow({ where: { id: venueId }, select: { ownerId: true } });
+  const staff = await db.venueStaff.findMany({ where: { venueId, permissions: { has: 'MANAGE_BOOKINGS' } }, select: { userId: true } });
   return [venue.ownerId, ...staff.map((s) => s.userId)];
 }

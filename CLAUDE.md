@@ -45,4 +45,6 @@ Database design (pre-ERD): [DATABASE_DESIGN.md](DATABASE_DESIGN.md).
 
 **Not started:** push delivery, image upload, mobile app.
 
+**Backend code structure (keep it when adding code):** `modules/<name>/` uses `*.routes.ts` (endpoints + middleware + `validate`) -> `*.controller.ts` (reads `valid(req, ...)` / `actorOf(req)`, calls the service, sets status) -> `*.service.ts` (business rules, Prisma, transactions; no Express) with `*.schemas.ts` (Zod). Add a file only when the module needs it. Shared code: `types/actor.ts`, `middleware/` (authenticate, validate, rate-limit), `lib/` (db-errors + `withDeadlockRetry`, `areBlocked`, jwt, mailer, time). Document exported service functions with a short JSDoc and explain WHY for locking, deadlock retry and lifecycle rules. No repository / use-case layers.
+
 **Gotchas:** on Windows, run `docker compose restart api` after editing source (file watching does not reach the container). Heredocs with long text get truncated in the shell tool: write scripts to files instead.
