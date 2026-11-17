@@ -1,5 +1,6 @@
 import { env } from '../../config/env';
 import { fillLinkTemplate } from '../../lib/links';
+import type { MailKind } from '@prisma/client';
 import type { Email } from '../../lib/mailer';
 
 type Locale = 'ar' | 'en';
@@ -24,4 +25,11 @@ export function resetPasswordMessage(to: string, locale: Locale, link: string): 
   return locale === 'ar'
     ? { to, subject: 'إعادة تعيين كلمة المرور - Find Your Match', text: `اضغط على الرابط لتعيين كلمة مرور جديدة (صالح لمدة ساعة):\n${link}\n\nإذا لم تطلب ذلك فتجاهل هذه الرسالة.` }
     : { to, subject: 'Reset your password - Find Your Match', text: `Open this link to choose a new password (valid for 1 hour):\n${link}\n\nIf you did not ask for this, ignore this message.` };
+}
+
+/** Renders a queued message at SEND time, so the current templates and link targets (VERIFY_EMAIL_URL / RESET_PASSWORD_URL) apply. */
+export function renderMail(kind: MailKind, to: string, locale: Locale, rawToken: string): Email {
+  return kind === 'EMAIL_VERIFY'
+    ? verifyEmailMessage(to, locale, verifyEmailLink(rawToken))
+    : resetPasswordMessage(to, locale, resetPasswordLink(rawToken));
 }

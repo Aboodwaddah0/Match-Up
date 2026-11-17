@@ -101,7 +101,7 @@ Dependencies between modules go one way and never in a circle: `matches -> booki
 | `GET /players/:userId` | Bearer | public profile: age, city, positions, skill, derived stats; no birth date/coordinates/e-mail; 404 if blocked |
 
 Send `Authorization: Bearer <accessToken>`. Errors look like `{ "error": { "code", "message" } }`.
-E-mail goes out over any SMTP provider: set `SMTP_URL` (e.g. `smtps://user:pass@smtp.example.com:465`) and `MAIL_FROM` in `.env`. Without `SMTP_URL`, development prints e-mails in the API log (`docker compose logs api`) and production sends nothing. A failed send is logged and never breaks registration or reset; the user can request a new link.
+E-mail goes out over any SMTP provider: set `SMTP_URL` (e.g. `smtps://user:pass@smtp.example.com:465`) and `MAIL_FROM` in `.env`. Without `SMTP_URL`, development prints e-mails in the API log (`docker compose logs api`) and production refuses to start. Mail is sent by a background worker from an outbox table, never inside a request (next section).
 
 ### Rate limits (authentication)
 
@@ -127,6 +127,32 @@ Counters live in memory per API instance: with several instances use a shared st
 - On `SIGTERM` / `SIGINT` the API stops accepting connections, finishes requests in flight, disconnects websockets, waits for a sweeper run in progress and closes the database. If that takes longer than `SHUTDOWN_TIMEOUT_MS` (default 8000, keep it below the orchestrator's kill timeout, Docker's is 10 s) the remaining connections are cut and the exit code is 1. An unhandled rejection or uncaught exception is logged as fatal and shuts down the same way.
 - With `NODE_ENV=production` the API refuses to start (listing every problem) if `JWT_ACCESS_SECRET` is one of the placeholders from this repo, the database password is the development one, `SMTP_URL` is missing, or the e-mail links would point at `localhost` (set `APP_URL`, or both `VERIFY_EMAIL_URL` and `RESET_PASSWORD_URL`).
 - Websocket sessions end when the access token that opened them expires, and at once on suspension, logout-everywhere and password change or reset. After a disconnect the client reconnects with a fresh token and fetches history over REST.
+
+### E-mail outbox (verification and password-reset mail)
+
+Registration, `forgot-password` and `resend-verification` do not talk to SMTP. In ONE database transaction they create the one-time token and a row in `mail_outbox`; if anything fails, both are rolled back. A worker in every API instance (`MAIL_WORKER_ENABLED`, default `true`; polls every 5 s and is woken immediately after a request) sends the message. Consequences: a dead mail server cannot hold a request, a crash between "token created" and "mail sent" loses nothing, and the e-mail is rendered at send time, so the existing templates and `VERIFY_EMAIL_URL` / `RESET_PASSWORD_URL` apply to queued messages too. Only the newest link works, so a newer request cancels an older queued message (`CANCELLED`, `SUPERSEDED`).
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | waiting for `next_attempt_at` |
+| `SENDING` | claimed by a worker under a 120 s lease |
+| `SENT` | accepted by the mail server |
+| `FAILED` | terminal: a refused recipient or message (SMTP 550-554), 6 failed attempts, a message that kept crashing its worker, or an undecryptable token |
+| `CANCELLED` | terminal: superseded by a newer message, or the link had already expired |
+
+- **Claiming.** `FOR UPDATE SKIP LOCKED`, one row at a time: workers never take the same row. A result is recorded only while the row is still the worker's own claim.
+- **Crash recovery.** A row left in `SENDING` by a dead worker is claimed again when its lease expires. The attempt is counted at claim time, so a message that keeps killing the worker still ends as `FAILED`.
+- **Retries.** Transient errors (timeouts, connection errors, SMTP 4xx, authentication problems that are our configuration) are retried after 30 s, 2 min, 10 min, 1 h, then 6 h (+-20 % jitter), 6 attempts in all. SMTP has connection, greeting, DNS and socket time limits plus a 45 s overall limit per send.
+- **At-least-once, so duplicates are possible.** SMTP cannot give exactly-once delivery. If the mail server accepts a message and the worker dies (or the local time limit fires) before the result is recorded, the message is sent again. Every attempt for one row uses the same `Message-ID`, which lets mail systems and clients recognize a duplicate, but that is not guaranteed. For these two mails a duplicate is harmless: both links are the same token.
+- **The token in the outbox, and its key.** The token table stores only a hash, so the outbox must not store the raw token in the clear: it is encrypted with AES-256-GCM (row id as associated data) and wiped (`NULL`, enforced by a CHECK constraint) as soon as the message is `SENT`, `FAILED` or `CANCELLED`. The key is a DEDICATED secret, `MAIL_OUTBOX_ENCRYPTION_KEY`: exactly 32 random bytes encoded as base64 (43 characters), used for nothing else and never derived from `JWT_ACCESS_SECRET`, so rotating the JWT signing secret does not affect queued mail. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`. **It is required in production**: the API refuses to start if it is missing, is not exactly 32 bytes, is a development placeholder, or equals `JWT_ACCESS_SECRET`. Outside production an unset key means a fixed, public development key (never the JWT secret); a value that is set but malformed is refused in every environment. There is no fallback in production.
+- **Rotating `MAIL_OUTBOX_ENCRYPTION_KEY`.** There is no key versioning: a message is readable only under the key it was queued with. After a rotation, messages still `PENDING` or `SENDING` cannot be decrypted; the worker ends them as `FAILED` (`DECRYPT_FAILED`, nothing is sent) and those users simply request a new link. Messages already `SENT` or finished are unaffected (they hold no secret). To rotate without losing anything: stop new mail from being queued (or accept the loss window), wait until no row is `PENDING` or `SENDING` (`SELECT count(*) FROM mail_outbox WHERE status IN ('PENDING','SENDING')` returns 0; a queued link is valid for at most 24 h), then switch the key on all instances. Rotating `JWT_ACCESS_SECRET` needs none of this.
+- **Logs.** Worker logs carry the outbox id, kind, attempt and an error code: never an address, a token or a mail body. (In development without `SMTP_URL`, the message is printed so you can copy the link; that never happens in production.)
+- **Retention.** Finished rows hold a recipient address: `SENT` rows are deleted after 7 days, `FAILED` and `CANCELLED` after 30.
+- **`forgot-password` does not reveal accounts.** Same `202` answer for existing, unknown and suspended accounts; nothing is sent inside the request; every call takes at least 250 ms, which hides the small database work a real account needs; a failure while queueing is logged and not reported (an error that only real accounts could cause would reveal them), and the user can simply ask again. Per-IP and per-address rate limits apply to all cases alike. (`register` still answers `409` for an address that is taken; that is a separate, existing choice.)
+
+**Deployment order.** Set `MAIL_OUTBOX_ENCRYPTION_KEY` on every instance first (production will not start without it), then run the migration (`migrate deploy` adds an empty table and two enums, nothing else changes), then start the new API. The old API keeps working on the new schema (it sends inline and ignores the table). The new API on an OLD schema fails every registration, so never deploy it before the migration. Tokens issued by the old version were already e-mailed inline, nothing needs converting.
+
+**Rollback.** Roll the API back first (or together with the migration). Dropping the table (`DROP TABLE mail_outbox; DROP TYPE mail_status; DROP TYPE mail_kind;`) discards every message still queued; those users must request a new link, and tokens already created remain valid. If the API is rolled back but the table is kept, queued messages stay unsent until the new version runs again, and expire (they are cancelled, never sent, once their link has expired).
 
 ### E-mail links
 

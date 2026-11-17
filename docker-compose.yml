@@ -59,6 +59,8 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-0}
       SHUTDOWN_TIMEOUT_MS: ${SHUTDOWN_TIMEOUT_MS:-8000}
       SMTP_URL: ${SMTP_URL:-}
+      MAIL_WORKER_ENABLED: ${MAIL_WORKER_ENABLED:-true}
+      MAIL_OUTBOX_ENCRYPTION_KEY: ${MAIL_OUTBOX_ENCRYPTION_KEY:-}
       MAIL_FROM: ${MAIL_FROM:-Find Your Match <no-reply@localhost>}
     ports:
       - "${API_PORT:-3000}:3000"

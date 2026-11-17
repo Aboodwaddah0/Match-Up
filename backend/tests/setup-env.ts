@@ -8,3 +8,4 @@ process.env.NODE_ENV = 'test';
 process.env.LOG_LEVEL = 'silent';
 process.env.JWT_ACCESS_SECRET = 'test-secret-test-secret-test-secret-123456';
 process.env.APP_URL = 'http://app.test';
+process.env.MAIL_OUTBOX_ENCRYPTION_KEY = Buffer.from('test-only-mail-key-test-only-012').toString('base64url');

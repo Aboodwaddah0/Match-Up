@@ -42,6 +42,23 @@ enum AccountStatus {
   @@map("account_status")
 }
 
+enum MailKind {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+
+  @@map("mail_kind")
+}
+
+enum MailStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+  CANCELLED
+
+  @@map("mail_status")
+}
+
 enum Locale {
   ar
   en
@@ -378,6 +395,7 @@ model User {
   reportsFiled  Report[]        @relation("Reporter")
   reportsSolved Report[]        @relation("ReportResolver")
   adminAudits   AdminAuditLog[]
+  mailOutbox    MailOutbox[]
 
   conversations ConversationParticipant[]
   messages      Message[]
@@ -1008,6 +1026,34 @@ model AdminAuditLog {
   @@index([actorId, createdAt])
   @@index([createdAt])
   @@map("admin_audit_log")
+}
+
+// ─────────────────────── E-mail outbox (MAIL-01) ───────────────────────
+
+/// Queue of e-mails to send, written in the same transaction as the business operation that needs them.
+/// Hand-written details (CHECK constraints, partial indexes, protocol) are in migration 20261118000100_mail_outbox.
+/// token_enc holds the one-time token ENCRYPTED and is NULL once the message is SENT / FAILED / CANCELLED.
+model MailOutbox {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String     @map("user_id") @db.Uuid
+  kind          MailKind
+  toEmail       String     @map("to_email")
+  locale        Locale
+  tokenEnc      String?    @map("token_enc")
+  expiresAt     DateTime   @map("expires_at") @db.Timestamptz(6)
+  status        MailStatus @default(PENDING)
+  attempts      Int        @default(0)
+  nextAttemptAt DateTime   @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  lockedUntil   DateTime?  @map("locked_until") @db.Timestamptz(6)
+  claimId       String?    @map("claim_id") @db.Uuid
+  lastError     String?    @map("last_error")
+  createdAt     DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  sentAt        DateTime?  @map("sent_at") @db.Timestamptz(6)
+  finishedAt    DateTime?  @map("finished_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("mail_outbox")
 }
 
 // ─────────────────────── Chat (later phase) ───────────────────────

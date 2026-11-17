@@ -36,8 +36,15 @@ export async function resetDb(): Promise<void> {
   ]);
 }
 
-/** Pulls the `token=` value out of the last e-mail sent to `to`. */
+/** Runs the outbox worker until the queue is empty, so queued e-mails are "sent" into the test inbox. */
+export async function flushMail(): Promise<void> {
+  const { runMailWorkerOnce } = await import('../../src/jobs/mail-worker');
+  await runMailWorkerOnce();
+}
+
+/** Pulls the `token=` value out of the last e-mail sent to `to` (after the outbox worker has run). */
 export async function lastEmailToken(to: string): Promise<string> {
+  await flushMail();
   const { testOutbox } = await import('../../src/lib/mailer');
   const mail = [...testOutbox].reverse().find((m) => m.to === to);
   const match = mail?.text.match(/token=([\w-]+)/);

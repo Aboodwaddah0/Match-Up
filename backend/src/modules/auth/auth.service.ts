@@ -4,12 +4,13 @@ import { env } from '../../config/env';
 import { randomToken, sha256 } from '../../lib/crypto';
 import { AppError } from '../../lib/errors';
 import { accessTokenTtlSeconds, signAccessToken } from '../../lib/jwt';
-import { sendEmail } from '../../lib/mailer';
+import { logger } from '../../lib/logger';
+import { enqueueMail } from '../../lib/mail-outbox';
+import { kickMailWorker } from '../../jobs/mail-worker';
 import { disconnectUser } from '../../lib/realtime';
 import { burnPasswordCheck, hashPassword, verifyPassword } from '../../lib/password';
 import { prisma } from '../../lib/prisma';
 import { toPublicUser } from '../users/users.service';
-import { resetPasswordLink, resetPasswordMessage, verifyEmailLink, verifyEmailMessage } from './auth.emails';
 
 const HOUR = 3_600_000;
 const VERIFY_TTL_MS = 24 * HOUR;
@@ -50,13 +51,13 @@ function revokeUserSessions(tx: Tx, userId: string) {
 
 // ───────────── one-time e-mail tokens (verify e-mail / reset password) ─────────────
 
-async function issueUserToken(userId: string, type: TokenType, ttlMs: number): Promise<string> {
+/** Creates the one-time token inside the caller's transaction (only the newest link works: unused older ones are deleted). */
+async function issueUserToken(tx: Tx, userId: string, type: TokenType, ttlMs: number): Promise<{ raw: string; expiresAt: Date }> {
   const raw = randomToken(32);
-  await prisma.$transaction([
-    prisma.userToken.deleteMany({ where: { userId, type, usedAt: null } }), // only the newest link works
-    prisma.userToken.create({ data: { userId, type, tokenHash: sha256(raw), expiresAt: new Date(Date.now() + ttlMs) } }),
-  ]);
-  return raw;
+  const expiresAt = new Date(Date.now() + ttlMs);
+  await tx.userToken.deleteMany({ where: { userId, type, usedAt: null } });
+  await tx.userToken.create({ data: { userId, type, tokenHash: sha256(raw), expiresAt } });
+  return { raw, expiresAt };
 }
 
 /** Atomically consumes a token (single use). Returns the user id, or throws INVALID_TOKEN. */
@@ -72,9 +73,14 @@ async function consumeUserToken(tx: Tx, raw: string, type: TokenType): Promise<s
   return row.userId;
 }
 
-async function sendVerificationEmail(user: Pick<User, 'id' | 'email' | 'locale'>): Promise<void> {
-  const raw = await issueUserToken(user.id, 'EMAIL_VERIFY', VERIFY_TTL_MS);
-  await sendEmail(verifyEmailMessage(user.email, user.locale, verifyEmailLink(raw)));
+/**
+ * Issues the token and queues the e-mail that carries it, in the caller's transaction: either both exist or neither does,
+ * so a crash can never leave a token nobody was told about, or a queued mail for a token that was rolled back.
+ * The caller must call `kickMailWorker()` AFTER the transaction commits.
+ */
+async function queueTokenMail(tx: Tx, user: Pick<User, 'id' | 'email' | 'locale'>, type: TokenType, ttlMs: number): Promise<void> {
+  const { raw, expiresAt } = await issueUserToken(tx, user.id, type, ttlMs);
+  await enqueueMail(tx, { userId: user.id, email: user.email, locale: user.locale, kind: type, rawToken: raw, expiresAt });
 }
 
 // ───────────── use cases ─────────────
@@ -83,8 +89,13 @@ export async function register(input: { email: string; password: string; fullNam
   const passwordHash = await hashPassword(input.password);
   let user: User;
   try {
-    user = await prisma.user.create({
-      data: { email: input.email, passwordHash, fullName: input.fullName, locale: input.locale },
+    // The account, its verification token and the queued e-mail are created together: all of them or none.
+    user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: { email: input.email, passwordHash, fullName: input.fullName, locale: input.locale },
+      });
+      await queueTokenMail(tx, created, 'EMAIL_VERIFY', VERIFY_TTL_MS);
+      return created;
     });
   } catch (e) {
     // email column is citext + unique: case-insensitive duplicates land here, including races
@@ -93,7 +104,7 @@ export async function register(input: { email: string; password: string; fullNam
     }
     throw e;
   }
-  await sendVerificationEmail(user);
+  kickMailWorker();
   return toPublicUser(user);
 }
 
@@ -105,11 +116,12 @@ export async function verifyEmail(rawToken: string): Promise<void> {
   });
 }
 
-/** Sends a new verification link (only the newest link works). 409 when the address is already verified. */
+/** Queues a new verification link (only the newest link works). 409 when the address is already verified. */
 export async function resendVerification(userId: string): Promise<void> {
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   if (user.emailVerifiedAt) throw new AppError(409, 'ALREADY_VERIFIED', 'E-mail is already verified');
-  await sendVerificationEmail(user);
+  await prisma.$transaction((tx) => queueTokenMail(tx, user, 'EMAIL_VERIFY', VERIFY_TTL_MS));
+  kickMailWorker();
 }
 
 /**
@@ -177,12 +189,30 @@ export async function logoutAll(userId: string): Promise<void> {
   disconnectUser(userId); // live chat sockets must not outlive the sessions (clients reconnect only after logging in again)
 }
 
-/** Always succeeds from the caller's point of view, so it cannot be used to discover accounts. */
+/** Every call takes at least this long, so an existing account (a little database work) cannot be told from an unknown one by timing. */
+const FORGOT_MIN_MS = 250;
+
+/**
+ * Always succeeds from the caller's point of view, so it cannot be used to discover accounts:
+ *  - same answer, and nothing is sent inline (the e-mail is queued and a worker sends it), so there is no SMTP time to measure;
+ *  - the small difference left (the token and outbox writes of a real account) is hidden by a fixed minimum duration;
+ *  - a failure while queueing is logged and NOT reported, because an error that only happens for real accounts would
+ *    reveal them. The user can simply ask again.
+ */
 export async function forgotPassword(email: string): Promise<void> {
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || user.status !== 'ACTIVE') return;
-  const raw = await issueUserToken(user.id, 'PASSWORD_RESET', RESET_TTL_MS);
-  await sendEmail(resetPasswordMessage(user.email, user.locale, resetPasswordLink(raw)));
+  const started = Date.now();
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (user && user.status === 'ACTIVE') {
+      await prisma.$transaction((tx) => queueTokenMail(tx, user, 'PASSWORD_RESET', RESET_TTL_MS));
+      kickMailWorker();
+    }
+  } catch (err) {
+    // No address and no error message in the log (they could name the account); the code is enough to investigate.
+    logger.error({ code: (err as { code?: string }).code, name: (err as Error).name }, 'forgot-password: could not queue the reset e-mail');
+  }
+  const wait = FORGOT_MIN_MS - (Date.now() - started);
+  if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
 }
 
 /**

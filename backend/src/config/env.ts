@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
 import { isLinkTemplate } from '../lib/links';
+import { DEV_MAIL_OUTBOX_KEY, isValidMailKey } from '../lib/mail-key';
 import { productionProblems } from './production-checks';
 
 dotenv.config({ quiet: true });
@@ -23,7 +24,18 @@ const schema = z.object({
   RESET_PASSWORD_URL: z.string().trim().optional().transform((v) => (v ? v : undefined)).refine((v) => v === undefined || isLinkTemplate(v), 'must be a URL containing {token}'),
   // E-mail over SMTP, e.g. smtps://user:password@smtp.example.com:465 . Empty = log in development, skip in production.
   SMTP_URL: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  // Dedicated key that encrypts one-time tokens while their e-mail is queued (32 random bytes, base64). REQUIRED in production, never
+  // derived from JWT_ACCESS_SECRET. Unset outside production = a fixed public development key. Generate:
+  //   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+  MAIL_OUTBOX_ENCRYPTION_KEY: z
+    .string()
+    .trim()
+    .optional()
+    .transform((v) => (v ? v : undefined))
+    .refine((v) => v === undefined || isValidMailKey(v), 'must be 32 random bytes encoded as base64 (43 characters), e.g. from: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"'),
   MAIL_FROM: z.string().trim().min(3).default('Find Your Match <no-reply@localhost>'),
+  // Sends queued e-mails (verification, password reset). Safe to run on several instances. Turn it off only on instances that must not send.
+  MAIL_WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   // Background sweepers (match start / close-unconfirmed). Safe to run on several instances.
   JOBS_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   // How long a shutdown may take before remaining connections are cut. Keep it BELOW the orchestrator's kill timeout (Docker: 10 s).
@@ -46,4 +58,5 @@ if (unsafe.length > 0) {
   process.exit(1);
 }
 
-export const env = parsed.data;
+// The production guard above has already refused a missing key; outside production the fixed development key stands in (never the JWT secret).
+export const env = { ...parsed.data, MAIL_OUTBOX_ENCRYPTION_KEY: parsed.data.MAIL_OUTBOX_ENCRYPTION_KEY ?? DEV_MAIL_OUTBOX_KEY };

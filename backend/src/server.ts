@@ -1,6 +1,7 @@
 import { createApp } from './app';
 import { env } from './config/env';
 import { scheduleLifecycleJobs } from './jobs/match-lifecycle';
+import { scheduleMailWorker } from './jobs/mail-worker';
 import { logger } from './lib/logger';
 import { prisma } from './lib/prisma';
 import { attachRealtime, closeRealtime } from './lib/realtime';
@@ -19,7 +20,12 @@ if (env.NODE_ENV === 'production' && env.TRUST_PROXY === 0) {
   logger.warn('TRUST_PROXY is 0 in production: set TRUST_PROXY=1 when running behind a reverse proxy, or rate limits will be shared by all clients');
 }
 
-const stopJobs = env.JOBS_ENABLED && env.NODE_ENV !== 'test' ? scheduleLifecycleJobs() : async () => {};
+const stopLifecycle = env.JOBS_ENABLED && env.NODE_ENV !== 'test' ? scheduleLifecycleJobs() : async () => {};
+const stopMail = env.MAIL_WORKER_ENABLED && env.NODE_ENV !== 'test' ? scheduleMailWorker() : async () => {};
+// A send in progress is awaited; if it outlives the shutdown timeout its claim lease expires and the message is retried (see mail-worker.ts).
+const stopJobs = async () => {
+  await Promise.all([stopLifecycle(), stopMail()]);
+};
 
 let shuttingDown = false;
 
