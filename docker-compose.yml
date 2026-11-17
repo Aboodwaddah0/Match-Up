@@ -1,0 +1,90 @@
+# Find Your Match - local development stack
+#   docker compose up -d --build        # db + migrations + api (hot reload)
+#   docker compose --profile tools up -d # also starts Adminer (DB UI) on http://localhost:8080
+#   docker compose logs -f api
+#   docker compose down                  # stop (keeps data)   |   down -v  # stop AND wipe the database
+
+name: find-your-match
+
+services:
+  # ── PostgreSQL 16 (contrib modules citext, btree_gist, cube, earthdistance are included) ──
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fym}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fym_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-fym}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      # Bound to localhost only. 5433 avoids clashing with a PostgreSQL already installed on 5432.
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ── One-shot job: applies Prisma migrations (init + hand-written constraints/triggers) ──
+  migrate:
+    build:
+      context: ./backend
+      target: dev
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fym}:${POSTGRES_PASSWORD:-fym_dev_password}@db:5432/${POSTGRES_DB:-fym}?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  # ── API (TypeScript, hot reload via tsx watch) ──
+  api:
+    build:
+      context: ./backend
+      target: dev
+    command: ["npm", "run", "dev"]
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      LOG_LEVEL: debug
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fym}:${POSTGRES_PASSWORD:-fym_dev_password}@db:5432/${POSTGRES_DB:-fym}?schema=public
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-dev-only-secret-change-me-dev-only-secret-change-me}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      # Only source folders are mounted, so the image's node_modules (and generated Prisma client) are never shadowed.
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      - ./backend/tests:/app/tests
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 15s
+
+  # ── Optional DB UI: docker compose --profile tools up -d ──
+  adminer:
+    image: adminer:4
+    profiles: ["tools"]
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
