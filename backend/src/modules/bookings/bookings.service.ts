@@ -79,13 +79,22 @@ async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingId: stri
  * change together or not at all. EXTERNAL bookings are never cancelled here (nothing to free), and a booking that is
  * not the caller's (or already finished) is silently left alone. Returns true only when a booking was actually cancelled (the
  * admin audit record of a match cancellation names it).
+ * BOOK-02: the status that decides is read under the booking's row lock (`lockedStatus`), like confirm / reject / cancel (BOOK-01), so a
+ * direct cancellation, a completion or an expiry that is running at the same moment is waited for and then seen: a booking that is no longer
+ * PENDING / CONFIRMED is left alone (no second transition, event, notification or audit mention).
+ * Lock order: the caller (cancelMatch) already holds the MATCH row, so this is match -> booking. Every path that locks a booking first
+ * (requester / venue / admin cancel, confirm, reject) afterwards only inserts rows and READS matches (notifyLinkedMatches), and the sweepers
+ * use SKIP LOCKED, so nothing holding a booking ever waits for a match: there is no cycle.
  */
 export async function releaseBookingForMatch(tx: Prisma.TransactionClient, actor: Actor, bookingId: string): Promise<boolean> {
+  // Facts that never change (source, owner, venue, times of an in-app booking) are read first; the STATUS is decided only after the lock.
   const b = await tx.booking.findUnique({ where: { id: bookingId }, include: { field: { select: { venueId: true } } } });
-  if (!b || b.source !== 'IN_APP' || !['PENDING', 'CONFIRMED'].includes(b.status)) return false;
+  if (!b || b.source !== 'IN_APP') return false;
   if (b.createdById !== actor.userId && actor.role !== 'ADMIN') return false;
+  const locked = await lockedStatus(tx, bookingId);
+  if (locked !== 'PENDING' && locked !== 'CONFIRMED') return false;
   await tx.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: 'match cancelled' } });
-  await event(tx, bookingId, actor.userId, b.status, 'CANCELLED', 'match cancelled');
+  await event(tx, bookingId, actor.userId, locked, 'CANCELLED', 'match cancelled');
   const managers = (await bookingManagerIds(b.field!.venueId, tx)).filter((u) => u !== actor.userId);
   await notify(tx, managers, 'BOOKING_CANCELLED', { bookingId, byVenue: false, reason: 'match cancelled', startAt: b.startAt.toISOString() }, { type: 'booking', id: bookingId });
   return true;
