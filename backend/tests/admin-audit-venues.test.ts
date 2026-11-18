@@ -334,6 +334,17 @@ describe('the action and its record commit together', () => {
     expect(await count()).toBe(0);
   });
 
+  it('simultaneous admin cancellations of the same booking leave ONE record and one winner (BOOK-01)', async () => {
+    for (let round = 0; round < 3; round++) {
+      const id = await slotBooking(9 + round);
+      expect((await api.call('POST', `${B}/${id}/confirm`, undefined, owner.token)).status).toBe(200);
+      const before = (await records()).filter((r) => r.action === 'BOOKING_CANCELLED_BY_ADMIN').length;
+      const answers = await Promise.all([api.call('POST', `${B}/${id}/cancel`, {}, admin.token), api.call('POST', `${B}/${id}/cancel`, {}, admin.token)]);
+      expect(answers.map((r) => r.status).sort()).toEqual([200, 409]);
+      expect((await records()).filter((r) => r.action === 'BOOKING_CANCELLED_BY_ADMIN')).toHaveLength(before + 1);
+    }
+  });
+
   it('simultaneous identical administrator changes leave ONE record', async () => {
     for (let round = 0; round < 4; round++) {
       const name = `Race name ${round}`;
@@ -344,7 +355,7 @@ describe('the action and its record commit together', () => {
     }
     const target = await slotBooking(9);
     const answers = await Promise.all([api.call('POST', `${B}/${target}/confirm`, undefined, admin.token), api.call('POST', `${B}/${target}/confirm`, undefined, admin.token)]);
-    expect(answers.every((r) => r.status === 200 || r.status === 409)).toBe(true); // (a repeated answer is idempotent, as before this change)
+    expect(answers.map((r) => r.status).sort()).toEqual([200, 409]); // BOOK-01: exactly one answer wins
     expect((await records()).filter((r) => r.action === 'BOOKING_CONFIRMED_BY_ADMIN')).toHaveLength(1);
   });
 });

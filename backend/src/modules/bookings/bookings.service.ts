@@ -207,10 +207,17 @@ export async function cancelBooking(actor: Actor, id: string, reason?: string | 
   if (b.status === 'CONFIRMED' && b.startAt <= new Date() && !byVenue) throw new AppError(409, 'BOOKING_STARTED', 'The booking has already started');
 
   await prisma.$transaction(async (tx) => {
+    // BOOK-01: the status checked above was read BEFORE this transaction. Decide again here, under the row lock: a simultaneous second
+    // cancel (or a confirm / expiry that got in first) finds the booking already moved on and is refused, so exactly one caller
+    // changes the booking, notifies and leaves an audit record. (The DB trigger only validates a status CHANGE, so CANCELLED -> CANCELLED
+    // would otherwise pass silently.)
     const locked = await lockedStatus(tx, id);
+    if (locked !== 'PENDING' && locked !== 'CONFIRMED') throw new AppError(409, 'INVALID_STATE', 'This booking can no longer be cancelled');
+    if (byVenue && locked === 'PENDING') throw new AppError(409, 'USE_REJECT', 'Reject a pending request instead of cancelling it');
+    if (locked === 'CONFIRMED' && b.startAt <= new Date() && !byVenue) throw new AppError(409, 'BOOKING_STARTED', 'The booking has already started');
     await tx.booking.update({ where: { id }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason ?? undefined } });
-    await event(tx, id, actor.userId, b.status, 'CANCELLED', reason);
-    if (audited && (locked === 'PENDING' || locked === 'CONFIRMED')) {
+    await event(tx, id, actor.userId, locked, 'CANCELLED', reason);
+    if (audited) {
       await recordAdminAudit(tx, { actorId: actor.userId, action: 'BOOKING_CANCELLED_BY_ADMIN', targetType: 'VENUE', targetId: b.field!.venue.id, reason, metadata: { bookingId: id, fromStatus: locked, toStatus: 'CANCELLED' }, requestId });
     }
     if (b.field) {
@@ -223,8 +230,10 @@ export async function cancelBooking(actor: Actor, id: string, reason?: string | 
 }
 
 /**
- * The booking's status, read under a row lock as the first statement of an audited transaction (AUD-07). Two simultaneous answers to the
- * same booking queue up here, so only the one that really moves it out of PENDING / CONFIRMED finds the old status and writes the audit record.
+ * The booking's status, read under a row lock as the first statement of a confirm / reject / cancel transaction (AUD-07, BOOK-01). Two
+ * simultaneous answers to the same booking queue up here, and the caller decides on the status it finds AFTER the lock: only the first
+ * one still finds PENDING / CONFIRMED, so only it changes the booking, notifies and writes the audit record.
+ * Lock order is unchanged: this is the same booking row lock the UPDATE took anyway, now taken first.
  */
 async function lockedStatus(tx: Prisma.TransactionClient, id: string): Promise<BookingStatus> {
   const rows = await tx.$queryRaw<{ status: BookingStatus }[]>`SELECT status::text AS status FROM booking WHERE id = ${id}::uuid FOR NO KEY UPDATE`;
@@ -262,10 +271,13 @@ async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTE
 
   await prisma.$transaction(async (tx) => {
     // DB trigger: CONFIRMED only while the hold is alive (database clock), PENDING -> terminal exactly once.
+    // BOOK-01: decide again under the row lock (the status read above is from before the transaction). Of two simultaneous answers only
+    // the first finds PENDING; the other is refused with 409, so there is one transition, one notification and one audit record.
     const locked = await lockedStatus(tx, id);
+    if (locked !== 'PENDING') throw new AppError(409, 'INVALID_STATE', 'This request was already answered or expired');
     await tx.booking.update({ where: { id }, data: { status: decision, decidedById: actor.userId, ...(decision === 'REJECTED' ? { cancelReason: reason ?? undefined } : {}) } });
     await event(tx, id, actor.userId, 'PENDING', decision, reason);
-    if (isVenueAdminOverride(actor, rights) && locked === 'PENDING') {
+    if (isVenueAdminOverride(actor, rights)) {
       await recordAdminAudit(tx, { actorId: actor.userId, action: decision === 'CONFIRMED' ? 'BOOKING_CONFIRMED_BY_ADMIN' : 'BOOKING_REJECTED_BY_ADMIN', targetType: 'VENUE', targetId: b.field!.venue.id, reason, metadata: { bookingId: id, fromStatus: 'PENDING', toStatus: decision }, requestId });
     }
     const type: NotificationType = decision === 'CONFIRMED' ? 'BOOKING_CONFIRMED' : 'BOOKING_REJECTED';

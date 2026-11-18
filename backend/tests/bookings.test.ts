@@ -140,6 +140,121 @@ describe('the venue answers (D11)', () => {
   });
 });
 
+describe('simultaneous and repeated answers change a booking once (BOOK-01)', () => {
+  const notifications = async (userId: string, type: string, bookingId: string) =>
+    (await prismaClient()).notification.count({ where: { userId, type, resourceId: bookingId } });
+  const transitions = async (bookingId: string, to: string) => (await prismaClient()).bookingEvent.count({ where: { bookingId, toStatus: to as never } });
+  const pending = async (hour: number, day = 5) => (await book(player, localSlot(day, hour))).body.booking.id as string;
+  const ok = (r: { status: number }) => r.status === 200;
+  const conflict = (r: { status: number; body: { error?: { code?: string } } }) => r.status === 409 && r.body.error?.code === 'INVALID_STATE';
+
+  it('simultaneous confirmations: exactly one succeeds, the rest get 409, one transition and one notification (repeated)', async () => {
+    for (let round = 0; round < 5; round++) {
+      const id = await pending(9 + round, 6);
+      const results = await Promise.all([act(owner, id, 'confirm'), act(owner, id, 'confirm'), act(owner, id, 'confirm'), act(owner, id, 'confirm')]);
+      expect(results.filter(ok)).toHaveLength(1);
+      expect(results.filter(conflict)).toHaveLength(3);
+      expect(await status(id)).toBe('CONFIRMED');
+      expect(await transitions(id, 'CONFIRMED')).toBe(1);
+      expect(await notifications(player.userId, 'BOOKING_CONFIRMED', id)).toBe(1);
+    }
+  });
+
+  it('simultaneous rejections: exactly one succeeds, one notification', async () => {
+    for (let round = 0; round < 3; round++) {
+      const id = await pending(9 + round, 7);
+      const results = await Promise.all([act(owner, id, 'reject', { reason: 'full' }), act(owner, id, 'reject', { reason: 'full' }), act(owner, id, 'reject', { reason: 'full' })]);
+      expect(results.filter(ok)).toHaveLength(1);
+      expect(results.filter(conflict)).toHaveLength(2);
+      expect(await transitions(id, 'REJECTED')).toBe(1);
+      expect(await notifications(player.userId, 'BOOKING_REJECTED', id)).toBe(1);
+    }
+  });
+
+  it('simultaneous cancellations by the requester: exactly one succeeds, one transition, the venue is told once (repeated)', async () => {
+    for (let round = 0; round < 5; round++) {
+      const id = await pending(9 + round, 8);
+      if (round % 2 === 1) expect((await act(owner, id, 'confirm')).status).toBe(200); // a CONFIRMED booking is cancelled the same way
+      const results = await Promise.all([act(player, id, 'cancel', { reason: 'rain' }), act(player, id, 'cancel', { reason: 'rain' }), act(player, id, 'cancel', { reason: 'rain' })]);
+      expect(results.filter(ok)).toHaveLength(1);
+      expect(results.filter(conflict)).toHaveLength(2);
+      expect(await status(id)).toBe('CANCELLED');
+      expect(await transitions(id, 'CANCELLED')).toBe(1);
+      expect(await notifications(owner.userId, 'BOOKING_CANCELLED', id)).toBe(1);
+    }
+  });
+
+  it('simultaneous cancellations by the venue of a CONFIRMED booking: one succeeds, the requester is told once', async () => {
+    for (let round = 0; round < 4; round++) {
+      const id = await pending(9 + round, 9);
+      expect((await act(owner, id, 'confirm')).status).toBe(200);
+      const results = await Promise.all([act(owner, id, 'cancel', { reason: 'burst pipe' }), act(owner, id, 'cancel', { reason: 'burst pipe' })]);
+      expect(results.filter(ok)).toHaveLength(1);
+      expect(results.filter(conflict)).toHaveLength(1);
+      expect(await transitions(id, 'CANCELLED')).toBe(1);
+      expect(await notifications(player.userId, 'BOOKING_CANCELLED', id)).toBe(1);
+    }
+  });
+
+  it('the requester cancelling while the venue confirms: one decision wins, the other is refused, and what was announced matches the outcome', async () => {
+    for (let round = 0; round < 5; round++) {
+      const id = await pending(9 + round, 10);
+      const [confirmed, cancelled] = await Promise.all([act(owner, id, 'confirm'), act(player, id, 'cancel')]);
+      const final = await status(id);
+      expect(['CONFIRMED', 'CANCELLED']).toContain(final);
+      // either confirm won (then the cancel ran afterwards and also succeeded: CANCELLED) or cancel won (confirm refused)
+      if (final === 'CANCELLED') expect(await transitions(id, 'CANCELLED')).toBe(1);
+      expect(confirmed.status === 200 || confirmed.status === 409).toBe(true);
+      expect(cancelled.status === 200 || cancelled.status === 409).toBe(true);
+      expect(await transitions(id, 'CONFIRMED')).toBe(confirmed.status === 200 ? 1 : 0);
+      expect(await notifications(player.userId, 'BOOKING_CONFIRMED', id)).toBe(confirmed.status === 200 ? 1 : 0);
+    }
+  });
+
+  it('sequential duplicates: a second confirm or cancel is a 409 and adds no transition or notification', async () => {
+    const id = await pending(11);
+    expect((await act(owner, id, 'confirm')).status).toBe(200);
+    expect(conflict(await act(owner, id, 'confirm'))).toBe(true);
+    expect(await transitions(id, 'CONFIRMED')).toBe(1);
+    expect(await notifications(player.userId, 'BOOKING_CONFIRMED', id)).toBe(1);
+
+    expect((await act(player, id, 'cancel')).status).toBe(200);
+    expect(conflict(await act(player, id, 'cancel'))).toBe(true);
+    expect(conflict(await act(owner, id, 'cancel'))).toBe(true); // nobody can cancel it again
+    expect(await transitions(id, 'CANCELLED')).toBe(1);
+    expect(await notifications(owner.userId, 'BOOKING_CANCELLED', id)).toBe(1);
+    expect(conflict(await act(owner, id, 'confirm'))).toBe(true); // and a cancelled booking cannot be confirmed
+  });
+
+  it('authorization is unchanged: strangers still get 404, staff cannot answer their own request, the loser of a race is not told anything extra', async () => {
+    const stranger = await makeUser(api, 'stranger@example.com');
+    const id = await pending(13);
+    expect((await act(stranger, id, 'confirm')).status).toBe(404);
+    expect((await act(stranger, id, 'cancel')).status).toBe(404);
+    expect(await status(id)).toBe('PENDING');
+    const own = (await book(owner, localSlot(5, 16))).body.booking.id as string;
+    expect((await act(owner, own, 'confirm')).body.error.code).toBe('CANNOT_DECIDE_OWN_BOOKING');
+    expect((await act(player, id, 'confirm')).status).toBe(404); // the requester is not venue staff
+  });
+
+  it('a failure while notifying still rolls the whole answer back (nothing half done), and a retry then works', async () => {
+    const prisma = await prismaClient();
+    const id = await pending(14);
+    await prisma.$executeRawUnsafe(`CREATE OR REPLACE FUNCTION book01_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected failure'; END $$`);
+    await prisma.$executeRawUnsafe(`CREATE TRIGGER trg_book01_test_fail BEFORE INSERT ON "notification" FOR EACH ROW EXECUTE FUNCTION book01_test_fail()`);
+    try {
+      expect((await act(owner, id, 'confirm')).status).toBe(500);
+    } finally {
+      await prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS trg_book01_test_fail ON "notification"`);
+      await prisma.$executeRawUnsafe(`DROP FUNCTION IF EXISTS book01_test_fail()`);
+    }
+    expect(await status(id)).toBe('PENDING');
+    expect(await transitions(id, 'CONFIRMED')).toBe(0);
+    expect((await act(owner, id, 'confirm')).status).toBe(200);
+    expect(await notifications(player.userId, 'BOOKING_CONFIRMED', id)).toBe(1);
+  });
+});
+
 describe('the 2-hour hold (D1)', () => {
   it('an expired request can no longer be confirmed, and no longer blocks the slot', async () => {
     const other = await makeUser(api, 'o@example.com');
