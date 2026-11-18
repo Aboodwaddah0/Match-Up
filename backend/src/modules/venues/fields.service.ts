@@ -1,11 +1,13 @@
 import type { VenueField, VenueOpeningHours } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import type { z } from 'zod';
+import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
+import { lockVenue } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import { localParts, minutesToTimeColumn, parseHm, timeColumnToMinutes, weekdayOf, zonedToUtc } from '../../lib/time';
 import type { Actor } from '../../types/actor';
-import { requireVenuePermission } from './venues.access';
+import { isVenueAdminOverride, requireVenuePermission } from './venues.access';
 import type { createBlockSchema, createFieldSchema, openingHoursSchema, updateFieldSchema } from './venues.schemas';
 
 const FORMAT_SIZE = { F5: 5, F7: 7, F11: 11 } as const;
@@ -20,22 +22,42 @@ async function loadField(fieldId: string) {
 
 // ───────────────────────── fields ─────────────────────────
 
-/** Adds a field to a venue (requires MANAGE_FIELDS). Capacity defaults to both teams of the format (2 x players per side). */
-export async function createField(actor: Actor, venueId: string, input: z.infer<typeof createFieldSchema>) {
-  await requireVenuePermission(actor, venueId, 'MANAGE_FIELDS');
-  const f = await prisma.venueField.create({
-    data: { ...input, venueId, capacity: input.capacity ?? 2 * FORMAT_SIZE[input.format] },
+/** Adds a field to a venue (requires MANAGE_FIELDS). Capacity defaults to both teams of the format (2 x players per side). An administrator's change on a venue they do not own is audited (AUD-07). */
+export async function createField(actor: Actor, venueId: string, input: z.infer<typeof createFieldSchema>, requestId?: string) {
+  const rights = await requireVenuePermission(actor, venueId, 'MANAGE_FIELDS');
+  const f = await prisma.$transaction(async (tx) => {
+    const created = await tx.venueField.create({ data: { ...input, venueId, capacity: input.capacity ?? 2 * FORMAT_SIZE[input.format] } });
+    if (isVenueAdminOverride(actor, rights)) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_FIELD_CREATED_BY_ADMIN', targetType: 'VENUE', targetId: venueId, metadata: { fieldId: created.id }, requestId });
+    }
+    return created;
   });
   return { field: toField(f) };
 }
 
-/** Changes a field's name, price or active flag (requires MANAGE_FIELDS on its venue). */
-export async function updateField(actor: Actor, fieldId: string, input: z.infer<typeof updateFieldSchema>) {
+/**
+ * Changes a field's name, price or active flag (requires MANAGE_FIELDS on its venue).
+ * An administrator's change on a venue they do not own is audited (AUD-07) with the names of the fields that really changed; no record when nothing changes.
+ */
+export async function updateField(actor: Actor, fieldId: string, input: z.infer<typeof updateFieldSchema>, requestId?: string) {
   const field = await loadField(fieldId);
-  await requireVenuePermission(actor, field.venueId, 'MANAGE_FIELDS');
+  const rights = await requireVenuePermission(actor, field.venueId, 'MANAGE_FIELDS');
+  const audited = isVenueAdminOverride(actor, rights);
   // Existing PENDING/CONFIRMED bookings are never touched by a price change or deactivation;
   // bookings snapshot their price and the DB refuses NEW requests on an inactive field.
-  const f = await prisma.venueField.update({ where: { id: fieldId }, data: input });
+  const f = await prisma.$transaction(async (tx) => {
+    if (audited) await lockVenue(tx, field.venueId);
+    const before = audited ? await tx.venueField.findUniqueOrThrow({ where: { id: fieldId } }) : null;
+    const updated = await tx.venueField.update({ where: { id: fieldId }, data: input });
+    if (before) {
+      const was: Record<string, unknown> = { ...before, pricePerHour: Number(before.pricePerHour) };
+      const changed = Object.entries(input).filter(([k, val]) => was[k] !== val).map(([k]) => k);
+      if (changed.length > 0) {
+        await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_FIELD_UPDATED_BY_ADMIN', targetType: 'VENUE', targetId: field.venueId, metadata: { fieldId, changedFields: changed }, requestId });
+      }
+    }
+    return updated;
+  });
   return { field: toField(f) };
 }
 
@@ -43,16 +65,27 @@ function toField(f: VenueField) {
   return { id: f.id, venueId: f.venueId, name: f.name, format: f.format, capacity: f.capacity, pricePerHour: Number(f.pricePerHour), currency: f.currency, slotMinutes: f.slotMinutes, isActive: f.isActive };
 }
 
-/** Replaces the whole weekly schedule of the field (local wall-clock times in the venue's time zone). */
-export async function setOpeningHours(actor: Actor, fieldId: string, input: z.infer<typeof openingHoursSchema>) {
+/**
+ * Replaces the whole weekly schedule of the field (local wall-clock times in the venue's time zone). An administrator's change on a
+ * venue they do not own is audited (AUD-07) when the schedule really differs from the current one.
+ */
+export async function setOpeningHours(actor: Actor, fieldId: string, input: z.infer<typeof openingHoursSchema>, requestId?: string) {
   const field = await loadField(fieldId);
-  await requireVenuePermission(actor, field.venueId, 'MANAGE_AVAILABILITY');
-  await prisma.$transaction([
-    prisma.venueOpeningHours.deleteMany({ where: { fieldId } }),
-    prisma.venueOpeningHours.createMany({
+  const rights = await requireVenuePermission(actor, field.venueId, 'MANAGE_AVAILABILITY');
+  const audited = isVenueAdminOverride(actor, rights);
+  await prisma.$transaction(async (tx) => {
+    if (audited) await lockVenue(tx, field.venueId);
+    const key = (weekday: number, open: number, close: number) => `${weekday}|${open}|${close}`;
+    const before = audited ? (await tx.venueOpeningHours.findMany({ where: { fieldId } })).map((h) => key(h.weekday, timeColumnToMinutes(h.openTime), timeColumnToMinutes(h.closeTime))).sort() : [];
+    const after = input.hours.map((h) => key(h.weekday, parseHm(h.open), parseHm(h.close))).sort();
+    await tx.venueOpeningHours.deleteMany({ where: { fieldId } });
+    await tx.venueOpeningHours.createMany({
       data: input.hours.map((h) => ({ fieldId, weekday: h.weekday, openTime: minutesToTimeColumn(parseHm(h.open)), closeTime: minutesToTimeColumn(parseHm(h.close)) })),
-    }),
-  ]);
+    });
+    if (audited && (before.length !== after.length || before.some((k, i) => k !== after[i]))) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_HOURS_REPLACED_BY_ADMIN', targetType: 'VENUE', targetId: field.venueId, metadata: { fieldId }, requestId });
+    }
+  });
   return { hours: input.hours };
 }
 
@@ -64,10 +97,11 @@ export async function setOpeningHours(actor: Actor, fieldId: string, input: z.in
  * clashing bookings are returned so the owner can reject / cancel them first. The pre-check is only for a friendly
  * message; the database re-checks atomically (per-field lock + exclusion constraints), so a booking request that
  * sneaks in between the check and the insert still cannot overlap the block.
+ * An administrator's block on a venue they do not own is audited (AUD-07), with the ids of the blocks created.
  */
-export async function createBlock(actor: Actor, fieldId: string, input: z.infer<typeof createBlockSchema>) {
+export async function createBlock(actor: Actor, fieldId: string, input: z.infer<typeof createBlockSchema>, requestId?: string) {
   const field = await loadField(fieldId);
-  await requireVenuePermission(actor, field.venueId, 'MANAGE_AVAILABILITY');
+  const rights = await requireVenuePermission(actor, field.venueId, 'MANAGE_AVAILABILITY');
   const startAt = new Date(input.startAt);
   const endAt = new Date(input.endAt);
 
@@ -91,13 +125,18 @@ export async function createBlock(actor: Actor, fieldId: string, input: z.infer<
 
   const groupId = targets.length > 1 ? randomUUID() : null;
   // DB: per-field lock + exclusion constraints re-check this atomically against concurrent booking requests.
-  const blocks = await prisma.$transaction(
-    targets.map((t) =>
-      prisma.venueBlock.create({
-        data: { venueFieldId: t.id, startAt, endAt, reason: input.reason, note: input.note, groupId, createdById: actor.userId },
-      }),
-    ),
-  );
+  const blocks = await prisma.$transaction(async (tx) => {
+    const audited = isVenueAdminOverride(actor, rights);
+    if (audited) await lockVenue(tx, field.venueId);
+    const created = [];
+    for (const t of targets) {
+      created.push(await tx.venueBlock.create({ data: { venueFieldId: t.id, startAt, endAt, reason: input.reason, note: input.note, groupId, createdById: actor.userId } }));
+    }
+    if (audited) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_BLOCK_CREATED_BY_ADMIN', targetType: 'VENUE', targetId: field.venueId, metadata: { blockIds: created.map((b) => b.id), fieldIds: created.map((b) => b.venueFieldId) }, requestId });
+    }
+    return created;
+  });
   return { blocks: blocks.map(toBlock) };
 }
 
@@ -116,12 +155,18 @@ export async function listBlocks(actor: Actor, fieldId: string, from?: string) {
   return { blocks: rows.map(toBlock) };
 }
 
-/** Removes a block, freeing the time again (requires MANAGE_AVAILABILITY on the block's venue). */
-export async function deleteBlock(actor: Actor, blockId: string): Promise<void> {
+/** Removes a block, freeing the time again (requires MANAGE_AVAILABILITY on the block's venue). An administrator's removal on a venue they do not own is audited (AUD-07). */
+export async function deleteBlock(actor: Actor, blockId: string, requestId?: string): Promise<void> {
   const block = await prisma.venueBlock.findUnique({ where: { id: blockId }, include: { field: true } });
   if (!block) throw new AppError(404, 'BLOCK_NOT_FOUND', 'Block not found');
-  await requireVenuePermission(actor, block.field.venueId, 'MANAGE_AVAILABILITY');
-  await prisma.venueBlock.delete({ where: { id: blockId } });
+  const rights = await requireVenuePermission(actor, block.field.venueId, 'MANAGE_AVAILABILITY');
+  await prisma.$transaction(async (tx) => {
+    const res = await tx.venueBlock.deleteMany({ where: { id: blockId } });
+    if (res.count === 0) throw new AppError(404, 'BLOCK_NOT_FOUND', 'Block not found'); // removed by someone else in the meantime
+    if (isVenueAdminOverride(actor, rights)) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_BLOCK_DELETED_BY_ADMIN', targetType: 'VENUE', targetId: block.field.venueId, metadata: { blockId, fieldId: block.venueFieldId }, requestId });
+    }
+  });
 }
 
 // ───────────────────────── availability ─────────────────────────

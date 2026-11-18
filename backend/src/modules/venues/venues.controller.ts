@@ -23,7 +23,7 @@ export const get = async (req: Request, res: Response) => {
 
 export const update = async (req: Request, res: Response) => {
   const { venueId } = valid(req, 'params', venueIdParams);
-  res.json({ venue: await venues.updateVenue(actorOf(req), venueId, valid(req, 'body', updateVenueSchema)) });
+  res.json({ venue: await venues.updateVenue(actorOf(req), venueId, valid(req, 'body', updateVenueSchema), String(req.id)) });
 };
 
 // ── staff: /venues/:venueId/staff ──
@@ -33,23 +33,23 @@ export const listStaff = async (req: Request, res: Response) => {
 
 export const addStaff = async (req: Request, res: Response) => {
   const { venueId } = valid(req, 'params', venueIdParams);
-  res.status(201).json(await venues.addStaff(actorOf(req), venueId, valid(req, 'body', staffSchema)));
+  res.status(201).json(await venues.addStaff(actorOf(req), venueId, valid(req, 'body', staffSchema), String(req.id)));
 };
 
 export const removeStaff = async (req: Request, res: Response) => {
   const { venueId, userId } = valid(req, 'params', staffParams);
-  await venues.removeStaff(actorOf(req), venueId, userId);
+  await venues.removeStaff(actorOf(req), venueId, userId, String(req.id));
   res.status(204).end();
 };
 
 // ── images: /venues/:venueId/images ──
 export const addImage = async (req: Request, res: Response) => {
   const { venueId } = valid(req, 'params', venueIdParams);
-  res.status(201).json(await venues.addImage(actorOf(req), venueId, valid(req, 'body', imageSchema).url));
+  res.status(201).json(await venues.addImage(actorOf(req), venueId, valid(req, 'body', imageSchema).url, String(req.id)));
 };
 
 export const removeImage = async (req: Request, res: Response) => {
   const { venueId, imageId } = valid(req, 'params', imageParams);
-  await venues.removeImage(actorOf(req), venueId, imageId);
+  await venues.removeImage(actorOf(req), venueId, imageId, String(req.id));
   res.status(204).end();
 };

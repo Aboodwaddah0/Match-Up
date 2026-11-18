@@ -17,3 +17,14 @@ export async function lockMatch(tx: Prisma.TransactionClient, matchId: string): 
   if (rows.length === 0) throw new AppError(404, 'MATCH_NOT_FOUND', 'Match not found');
   return rows[0]!.status;
 }
+
+/**
+ * Locks a venue row (FOR NO KEY UPDATE), as the first statement of an administrator's venue change that is audited (AUD-07).
+ * WHY: the audit record must describe a real change ("was X, now Y"), so the before-state is read under this lock; two simultaneous
+ * identical changes then queue up and only the first one finds something to change. Parent row first, like lockMatch. Foreign-key
+ * checks of children (fields, staff, images) take a weaker lock that does not conflict, so nothing else waits on it needlessly.
+ */
+export async function lockVenue(tx: Prisma.TransactionClient, venueId: string): Promise<void> {
+  const rows = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM venue WHERE id = ${venueId}::uuid FOR NO KEY UPDATE`;
+  if (rows.length === 0) throw new AppError(404, 'VENUE_NOT_FOUND', 'Venue not found');
+}

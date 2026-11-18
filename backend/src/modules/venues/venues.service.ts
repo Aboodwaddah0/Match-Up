@@ -1,10 +1,12 @@
 import { Prisma, type VenuePermission } from '@prisma/client';
 import type { z } from 'zod';
+import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
+import { lockVenue } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import { formatHm, timeColumnToMinutes } from '../../lib/time';
 import type { Actor } from '../../types/actor';
-import { DEFAULT_PERMISSIONS, requireVenuePermission, venueRights, type VenueRights } from './venues.access';
+import { DEFAULT_PERMISSIONS, isVenueAdminOverride, requireVenuePermission, venueRights, type VenueRights } from './venues.access';
 import type { createVenueSchema, staffSchema, updateVenueSchema, venueSearchSchema } from './venues.schemas';
 
 const venueInclude = {
@@ -83,20 +85,36 @@ export async function getVenue(actor: Actor, id: string) {
   };
 }
 
-/** Edits the venue's details (requires EDIT_VENUE on this venue). */
-export async function updateVenue(actor: Actor, id: string, input: z.infer<typeof updateVenueSchema>) {
-  await requireVenuePermission(actor, id, 'EDIT_VENUE');
+/**
+ * Edits the venue's details (requires EDIT_VENUE on this venue). An administrator editing a venue they do not own leaves an audit
+ * record (AUD-07) naming the fields that really changed (never their values), in the same transaction; an edit that changes nothing
+ * is not recorded.
+ */
+export async function updateVenue(actor: Actor, id: string, input: z.infer<typeof updateVenueSchema>, requestId?: string) {
+  const rights = await requireVenuePermission(actor, id, 'EDIT_VENUE');
   if (input.cityId) await assertCity(input.cityId);
+  const audited = isVenueAdminOverride(actor, rights);
 
-  if (input.status !== undefined) {
-    // An owner may switch the venue ACTIVE <-> INACTIVE, but must never undo an administrator's suspension (moderation
-    // would be meaningless). The "not SUSPENDED" condition is part of the UPDATE itself, so it is atomic: it also holds
-    // when an admin suspends the venue between our permission check and this write.
-    const r = await prisma.venue.updateMany({ where: { id, status: { not: 'SUSPENDED' } }, data: input });
-    if (r.count === 0) throw new AppError(403, 'VENUE_SUSPENDED', 'This venue was suspended by an administrator; contact support');
-  } else {
-    await prisma.venue.update({ where: { id }, data: input });
-  }
+  await prisma.$transaction(async (tx) => {
+    if (audited) await lockVenue(tx, id);
+    const before = audited ? await tx.venue.findUniqueOrThrow({ where: { id } }) : null;
+    if (input.status !== undefined) {
+      // An owner may switch the venue ACTIVE <-> INACTIVE, but must never undo an administrator's suspension (moderation
+      // would be meaningless). The "not SUSPENDED" condition is part of the UPDATE itself, so it is atomic: it also holds
+      // when an admin suspends the venue between our permission check and this write.
+      const r = await tx.venue.updateMany({ where: { id, status: { not: 'SUSPENDED' } }, data: input });
+      if (r.count === 0) throw new AppError(403, 'VENUE_SUSPENDED', 'This venue was suspended by an administrator; contact support');
+    } else {
+      await tx.venue.update({ where: { id }, data: input });
+    }
+    if (before) {
+      const changed = Object.entries(input).filter(([k, val]) => (before as Record<string, unknown>)[k] !== (val ?? null)).map(([k]) => k);
+      if (changed.length > 0) {
+        const statusChange = changed.includes('status') ? { fromStatus: before.status, toStatus: input.status! } : {};
+        await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_UPDATED_BY_ADMIN', targetType: 'VENUE', targetId: id, metadata: { changedFields: changed, ...statusChange }, requestId });
+      }
+    }
+  });
   return venueDto(await load(id), { canSeeInactive: true });
 }
 
@@ -172,8 +190,11 @@ async function assertCanDelegate(rights: VenueRights, actor: Actor, venueId: str
   }
 }
 
-/** Adds (or updates) a staff member with a role and permissions; defaults come from the role. The owner cannot be added as staff. See assertCanDelegate for who may do what. */
-export async function addStaff(actor: Actor, venueId: string, input: z.infer<typeof staffSchema>) {
+/**
+ * Adds (or updates) a staff member with a role and permissions; defaults come from the role. The owner cannot be added as staff. See assertCanDelegate for who may do what.
+ * An administrator doing this on a venue they do not own leaves an audit record (AUD-07) when the staff row is new or its role / permissions change.
+ */
+export async function addStaff(actor: Actor, venueId: string, input: z.infer<typeof staffSchema>, requestId?: string) {
   const rights = await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
   const { venue } = rights;
   if (input.userId === venue.ownerId) throw new AppError(400, 'INVALID_STAFF', 'The owner already has full access');
@@ -182,10 +203,29 @@ export async function addStaff(actor: Actor, venueId: string, input: z.infer<typ
 
   const permissions = input.permissions ?? DEFAULT_PERMISSIONS[input.role];
   await assertCanDelegate(rights, actor, venueId, input.userId, permissions);
-  const row = await prisma.venueStaff.upsert({
-    where: { venueId_userId: { venueId, userId: input.userId } },
-    create: { venueId, userId: input.userId, role: input.role, permissions },
-    update: { role: input.role, permissions },
+  const audited = isVenueAdminOverride(actor, rights);
+  const row = await prisma.$transaction(async (tx) => {
+    if (audited) await lockVenue(tx, venueId);
+    const before = audited ? await tx.venueStaff.findUnique({ where: { venueId_userId: { venueId, userId: input.userId } } }) : null;
+    const saved = await tx.venueStaff.upsert({
+      where: { venueId_userId: { venueId, userId: input.userId } },
+      create: { venueId, userId: input.userId, role: input.role, permissions },
+      update: { role: input.role, permissions },
+    });
+    if (audited) {
+      const same = before && before.role === saved.role && before.permissions.length === saved.permissions.length && before.permissions.every((p) => saved.permissions.includes(p));
+      if (!same) {
+        await recordAdminAudit(tx, {
+          actorId: actor.userId,
+          action: before ? 'VENUE_STAFF_UPDATED_BY_ADMIN' : 'VENUE_STAFF_ADDED_BY_ADMIN',
+          targetType: 'VENUE',
+          targetId: venueId,
+          metadata: { subjectUserId: input.userId, role: saved.role, permissions: saved.permissions },
+          requestId,
+        });
+      }
+    }
+    return saved;
   });
   return { staff: { userId: row.userId, role: row.role, permissions: row.permissions } };
 }
@@ -197,28 +237,44 @@ export async function listStaff(actor: Actor, venueId: string) {
   return { staff: rows.map((r) => ({ userId: r.userId, fullName: r.user.fullName, avatarUrl: r.user.avatarUrl, role: r.role, permissions: r.permissions })) };
 }
 
-/** Removes a staff member from this venue only (permissions are never global). A staff member may always remove THEMSELVES; removing others follows assertCanDelegate. */
-export async function removeStaff(actor: Actor, venueId: string, userId: string): Promise<void> {
+/** Removes a staff member from this venue only (permissions are never global). A staff member may always remove THEMSELVES; removing others follows assertCanDelegate. An administrator's removal on a venue they do not own is audited (AUD-07). */
+export async function removeStaff(actor: Actor, venueId: string, userId: string, requestId?: string): Promise<void> {
   const rights = await requireVenuePermission(actor, venueId, 'MANAGE_STAFF');
   await assertCanDelegate(rights, actor, venueId, userId, null);
-  const res = await prisma.venueStaff.deleteMany({ where: { venueId, userId } });
-  if (res.count === 0) throw new AppError(404, 'STAFF_NOT_FOUND', 'This user is not staff at the venue');
+  await prisma.$transaction(async (tx) => {
+    const res = await tx.venueStaff.deleteMany({ where: { venueId, userId } });
+    if (res.count === 0) throw new AppError(404, 'STAFF_NOT_FOUND', 'This user is not staff at the venue');
+    if (isVenueAdminOverride(actor, rights)) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_STAFF_REMOVED_BY_ADMIN', targetType: 'VENUE', targetId: venueId, metadata: { subjectUserId: userId }, requestId });
+    }
+  });
 }
 
 // ───────────────────────── images ─────────────────────────
 
-/** Adds an image URL (max 10 per venue, appended last). Upload comes later, so these are https links. */
-export async function addImage(actor: Actor, venueId: string, url: string) {
-  await requireVenuePermission(actor, venueId, 'EDIT_VENUE');
-  const count = await prisma.venueImage.count({ where: { venueId } });
-  if (count >= 10) throw new AppError(409, 'TOO_MANY_IMAGES', 'A venue can have up to 10 images');
-  const image = await prisma.venueImage.create({ data: { venueId, url, sortOrder: count } });
+/** Adds an image URL (max 10 per venue, appended last). Upload comes later, so these are https links. An administrator's addition on a venue they do not own is audited (AUD-07; the image id, never the URL). */
+export async function addImage(actor: Actor, venueId: string, url: string, requestId?: string) {
+  const rights = await requireVenuePermission(actor, venueId, 'EDIT_VENUE');
+  const image = await prisma.$transaction(async (tx) => {
+    const audited = isVenueAdminOverride(actor, rights);
+    if (audited) await lockVenue(tx, venueId);
+    const count = await tx.venueImage.count({ where: { venueId } });
+    if (count >= 10) throw new AppError(409, 'TOO_MANY_IMAGES', 'A venue can have up to 10 images');
+    const created = await tx.venueImage.create({ data: { venueId, url, sortOrder: count } });
+    if (audited) await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_IMAGE_ADDED_BY_ADMIN', targetType: 'VENUE', targetId: venueId, metadata: { imageId: created.id }, requestId });
+    return created;
+  });
   return { image: { id: image.id, url: image.url } };
 }
 
-/** Removes one image of this venue. */
-export async function removeImage(actor: Actor, venueId: string, imageId: string): Promise<void> {
-  await requireVenuePermission(actor, venueId, 'EDIT_VENUE');
-  const res = await prisma.venueImage.deleteMany({ where: { id: imageId, venueId } });
-  if (res.count === 0) throw new AppError(404, 'IMAGE_NOT_FOUND', 'Image not found');
+/** Removes one image of this venue. An administrator's removal on a venue they do not own is audited (AUD-07). */
+export async function removeImage(actor: Actor, venueId: string, imageId: string, requestId?: string): Promise<void> {
+  const rights = await requireVenuePermission(actor, venueId, 'EDIT_VENUE');
+  await prisma.$transaction(async (tx) => {
+    const res = await tx.venueImage.deleteMany({ where: { id: imageId, venueId } });
+    if (res.count === 0) throw new AppError(404, 'IMAGE_NOT_FOUND', 'Image not found');
+    if (isVenueAdminOverride(actor, rights)) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'VENUE_IMAGE_REMOVED_BY_ADMIN', targetType: 'VENUE', targetId: venueId, metadata: { imageId }, requestId });
+    }
+  });
 }

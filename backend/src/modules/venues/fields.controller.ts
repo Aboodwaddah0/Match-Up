@@ -17,17 +17,17 @@ import {
 // ── fields: created under a venue, then addressed by their own id ──
 export const create = async (req: Request, res: Response) => {
   const { venueId } = valid(req, 'params', venueIdParams);
-  res.status(201).json(await fields.createField(actorOf(req), venueId, valid(req, 'body', createFieldSchema)));
+  res.status(201).json(await fields.createField(actorOf(req), venueId, valid(req, 'body', createFieldSchema), String(req.id)));
 };
 
 export const update = async (req: Request, res: Response) => {
   const { fieldId } = valid(req, 'params', fieldIdParams);
-  res.json(await fields.updateField(actorOf(req), fieldId, valid(req, 'body', updateFieldSchema)));
+  res.json(await fields.updateField(actorOf(req), fieldId, valid(req, 'body', updateFieldSchema), String(req.id)));
 };
 
 export const setOpeningHours = async (req: Request, res: Response) => {
   const { fieldId } = valid(req, 'params', fieldIdParams);
-  res.json(await fields.setOpeningHours(actorOf(req), fieldId, valid(req, 'body', openingHoursSchema)));
+  res.json(await fields.setOpeningHours(actorOf(req), fieldId, valid(req, 'body', openingHoursSchema), String(req.id)));
 };
 
 export const availability = async (req: Request, res: Response) => {
@@ -43,10 +43,10 @@ export const listBlocks = async (req: Request, res: Response) => {
 
 export const createBlock = async (req: Request, res: Response) => {
   const { fieldId } = valid(req, 'params', fieldIdParams);
-  res.status(201).json(await fields.createBlock(actorOf(req), fieldId, valid(req, 'body', createBlockSchema)));
+  res.status(201).json(await fields.createBlock(actorOf(req), fieldId, valid(req, 'body', createBlockSchema), String(req.id)));
 };
 
 export const deleteBlock = async (req: Request, res: Response) => {
-  await fields.deleteBlock(actorOf(req), valid(req, 'params', blockIdParams).blockId);
+  await fields.deleteBlock(actorOf(req), valid(req, 'params', blockIdParams).blockId, String(req.id));
   res.status(204).end();
 };

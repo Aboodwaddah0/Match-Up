@@ -1,11 +1,12 @@
 import { Prisma, type BookingStatus } from '@prisma/client';
 import type { z } from 'zod';
+import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { notify, type NotificationType } from '../notifications/notify';
 import { assertBookableWindow } from '../venues/fields.service';
 import type { Actor } from '../../types/actor';
-import { bookingManagerIds, requireVenuePermission, venueRights } from '../venues/venues.access';
+import { bookingManagerIds, isVenueAdminOverride, requireVenuePermission, venueRights } from '../venues/venues.access';
 import type { createBookingSchema, externalBookingSchema, myBookingsSchema, venueBookingsSchema } from './bookings.schemas';
 
 /*
@@ -186,25 +187,32 @@ export async function getBooking(actor: Actor, id: string) {
  * Cancels a PENDING or CONFIRMED booking. The requester may cancel their own (not after a CONFIRMED booking started).
  * Venue staff may cancel only CONFIRMED bookings (a pending request must be rejected instead, so the requester gets
  * a proper answer). Frees the slot, notifies the other side, and flags matches that relied on it.
+ * An administrator cancelling a booking at a venue they do not own leaves an audit record (AUD-07) in the same transaction.
  */
-export async function cancelBooking(actor: Actor, id: string, reason?: string | null) {
+export async function cancelBooking(actor: Actor, id: string, reason?: string | null, requestId?: string) {
   const b = await load(id);
   const isRequester = b.createdById === actor.userId;
 
   let byVenue = false;
+  let audited = false;
   if (!isRequester) {
     if (!b.field) throw new AppError(404, 'BOOKING_NOT_FOUND', 'Booking not found');
     const rights = await venueRights(actor, b.field.venue.id);
     if (!rights.can('MANAGE_BOOKINGS')) throw new AppError(404, 'BOOKING_NOT_FOUND', 'Booking not found');
     if (b.status === 'PENDING') throw new AppError(409, 'USE_REJECT', 'Reject a pending request instead of cancelling it');
     byVenue = true;
+    audited = isVenueAdminOverride(actor, rights);
   }
   if (!['PENDING', 'CONFIRMED'].includes(b.status)) throw new AppError(409, 'INVALID_STATE', 'This booking can no longer be cancelled');
   if (b.status === 'CONFIRMED' && b.startAt <= new Date() && !byVenue) throw new AppError(409, 'BOOKING_STARTED', 'The booking has already started');
 
   await prisma.$transaction(async (tx) => {
+    const locked = await lockedStatus(tx, id);
     await tx.booking.update({ where: { id }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason ?? undefined } });
     await event(tx, id, actor.userId, b.status, 'CANCELLED', reason);
+    if (audited && (locked === 'PENDING' || locked === 'CONFIRMED')) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'BOOKING_CANCELLED_BY_ADMIN', targetType: 'VENUE', targetId: b.field!.venue.id, reason, metadata: { bookingId: id, fromStatus: locked, toStatus: 'CANCELLED' }, requestId });
+    }
     if (b.field) {
       const targets = byVenue ? [b.createdById] : (await bookingManagerIds(b.field.venue.id)).filter((u) => u !== actor.userId);
       await notify(tx, targets, 'BOOKING_CANCELLED', { bookingId: id, byVenue, reason: reason ?? null, startAt: b.startAt.toISOString() }, { type: 'booking', id });
@@ -212,6 +220,16 @@ export async function cancelBooking(actor: Actor, id: string, reason?: string | 
     await notifyLinkedMatches(tx, id, 'CANCELLED');
   });
   return { booking: dto(await load(id)) };
+}
+
+/**
+ * The booking's status, read under a row lock as the first statement of an audited transaction (AUD-07). Two simultaneous answers to the
+ * same booking queue up here, so only the one that really moves it out of PENDING / CONFIRMED finds the old status and writes the audit record.
+ */
+async function lockedStatus(tx: Prisma.TransactionClient, id: string): Promise<BookingStatus> {
+  const rows = await tx.$queryRaw<{ status: BookingStatus }[]>`SELECT status::text AS status FROM booking WHERE id = ${id}::uuid FOR NO KEY UPDATE`;
+  if (rows.length === 0) throw new AppError(404, 'BOOKING_NOT_FOUND', 'Booking not found');
+  return rows[0]!.status;
 }
 
 // ───────────────────────── venue side ─────────────────────────
@@ -232,8 +250,9 @@ export async function venueBookings(actor: Actor, venueId: string, q: z.infer<ty
  * Staff answer to a PENDING in-app request. Rules: caller needs MANAGE_BOOKINGS (else 404), and cannot answer
  * their own request (another staff member must). The DB trigger refuses a confirmation after the 2h hold expired
  * (using the database clock) and lets a request leave PENDING exactly once, so double answers cannot happen.
+ * An administrator answering for a venue they do not own leaves an audit record (AUD-07); the exactly-once rule means a double answer cannot leave two.
  */
-async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTED', reason?: string | null) {
+async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTED', reason?: string | null, requestId?: string) {
   const b = await load(id);
   if (!b.field || b.source !== 'IN_APP') throw new AppError(400, 'NOT_DECIDABLE', 'Only in-app booking requests need a decision');
   const rights = await venueRights(actor, b.field.venue.id);
@@ -243,8 +262,12 @@ async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTE
 
   await prisma.$transaction(async (tx) => {
     // DB trigger: CONFIRMED only while the hold is alive (database clock), PENDING -> terminal exactly once.
+    const locked = await lockedStatus(tx, id);
     await tx.booking.update({ where: { id }, data: { status: decision, decidedById: actor.userId, ...(decision === 'REJECTED' ? { cancelReason: reason ?? undefined } : {}) } });
     await event(tx, id, actor.userId, 'PENDING', decision, reason);
+    if (isVenueAdminOverride(actor, rights) && locked === 'PENDING') {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: decision === 'CONFIRMED' ? 'BOOKING_CONFIRMED_BY_ADMIN' : 'BOOKING_REJECTED_BY_ADMIN', targetType: 'VENUE', targetId: b.field!.venue.id, reason, metadata: { bookingId: id, fromStatus: 'PENDING', toStatus: decision }, requestId });
+    }
     const type: NotificationType = decision === 'CONFIRMED' ? 'BOOKING_CONFIRMED' : 'BOOKING_REJECTED';
     await notify(tx, [b.createdById], type, { bookingId: id, venueName: b.field!.venue.name, startAt: b.startAt.toISOString(), reason: reason ?? null }, { type: 'booking', id });
   });
@@ -252,6 +275,6 @@ async function decide(actor: Actor, id: string, decision: 'CONFIRMED' | 'REJECTE
 }
 
 /** Staff confirm a pending in-app request (see `decide` for the rules). */
-export const confirmBooking = (actor: Actor, id: string) => decide(actor, id, 'CONFIRMED');
+export const confirmBooking = (actor: Actor, id: string, requestId?: string) => decide(actor, id, 'CONFIRMED', undefined, requestId);
 /** Staff reject a pending in-app request, with an optional reason shown to the requester. The slot is freed at once. */
-export const rejectBooking = (actor: Actor, id: string, reason?: string | null) => decide(actor, id, 'REJECTED', reason);
+export const rejectBooking = (actor: Actor, id: string, reason?: string | null, requestId?: string) => decide(actor, id, 'REJECTED', reason, requestId);

@@ -30,6 +30,12 @@ export async function venueRights(actor: Actor, venueId: string): Promise<VenueR
   return { venue, isOwner, staff, can: (p) => granted.has(p) };
 }
 
+/**
+ * AUD-07: an administrator changing a venue they do NOT own is an override and is written to the admin audit log. Owners and staff
+ * (also when they happen to be admins on their own venue) are ordinary venue management and are never recorded.
+ */
+export const isVenueAdminOverride = (actor: Actor, rights: VenueRights): boolean => actor.role === 'ADMIN' && !rights.isOwner;
+
 /** Loads the venue and requires the permission; 404 for strangers of a hidden venue, 403 otherwise. */
 export async function requireVenuePermission(actor: Actor, venueId: string, permission: VenuePermission): Promise<VenueRights> {
   const rights = await venueRights(actor, venueId);

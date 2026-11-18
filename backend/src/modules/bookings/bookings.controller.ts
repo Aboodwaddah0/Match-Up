@@ -31,17 +31,17 @@ export const get = async (req: Request, res: Response) => {
 
 export const cancel = async (req: Request, res: Response) => {
   const { bookingId } = valid(req, 'params', bookingIdParams);
-  res.json(await bookings.cancelBooking(actorOf(req), bookingId, valid(req, 'body', reasonSchema).reason));
+  res.json(await bookings.cancelBooking(actorOf(req), bookingId, valid(req, 'body', reasonSchema).reason, String(req.id)));
 };
 
 // ── venue staff answer requests: /bookings/:id/confirm | reject ──
 export const confirm = async (req: Request, res: Response) => {
-  res.json(await bookings.confirmBooking(actorOf(req), valid(req, 'params', bookingIdParams).bookingId));
+  res.json(await bookings.confirmBooking(actorOf(req), valid(req, 'params', bookingIdParams).bookingId, String(req.id)));
 };
 
 export const reject = async (req: Request, res: Response) => {
   const { bookingId } = valid(req, 'params', bookingIdParams);
-  res.json(await bookings.rejectBooking(actorOf(req), bookingId, valid(req, 'body', reasonSchema).reason));
+  res.json(await bookings.rejectBooking(actorOf(req), bookingId, valid(req, 'body', reasonSchema).reason, String(req.id)));
 };
 
 // ── venue inbox: /venues/:venueId/bookings ──
