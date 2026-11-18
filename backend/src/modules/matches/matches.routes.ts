@@ -9,6 +9,7 @@ import {
   createMatchSchema,
   createRequestSchema,
   inviteSchema,
+  listRequestsQuery,
   matchIdParams,
   mineSchema,
   participantParams,
@@ -36,7 +37,7 @@ matchesRouter.post('/:matchId/complete', validate({ params: matchIdParams }), ma
 // ── join requests ──
 matchesRouter.post('/:matchId/requests', requireVerifiedEmail, joinRequestLimiter, validate({ params: matchIdParams, body: createRequestSchema, optionalBody: true }), participation.createRequest);
 matchesRouter.delete('/:matchId/requests/me', validate({ params: matchIdParams }), participation.withdrawRequest);
-matchesRouter.get('/:matchId/requests', validate({ params: matchIdParams }), participation.listRequests);
+matchesRouter.get('/:matchId/requests', validate({ params: matchIdParams, query: listRequestsQuery }), participation.listRequests);
 matchesRouter.post('/:matchId/requests/:requestId/accept', validate({ params: requestParams }), participation.acceptRequest);
 matchesRouter.post('/:matchId/requests/:requestId/reject', validate({ params: requestParams }), participation.rejectRequest);
 

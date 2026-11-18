@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import { actorOf } from '../../middleware/authenticate';
 import { valid } from '../../middleware/validate';
-import { attendanceSchema, createRequestSchema, inviteSchema, matchIdParams, participantParams, requestParams } from './matches.schemas';
+import { attendanceSchema, createRequestSchema, inviteSchema, listRequestsQuery, matchIdParams, participantParams, requestParams } from './matches.schemas';
 import * as participation from './participation.service';
 
 // ── join requests (the ASK; never counts toward capacity) ──
@@ -17,7 +17,7 @@ export const withdrawRequest = async (req: Request, res: Response) => {
 };
 
 export const listRequests = async (req: Request, res: Response) => {
-  res.json(await participation.listPendingRequests(actorOf(req), valid(req, 'params', matchIdParams).matchId));
+  res.json(await participation.listPendingRequests(actorOf(req), valid(req, 'params', matchIdParams).matchId, valid(req, 'query', listRequestsQuery)));
 };
 
 export const acceptRequest = async (req: Request, res: Response) => {

@@ -90,6 +90,11 @@ export const mineSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).default(20),
 });
 
+export const listRequestsQuery = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+});
+
 export const createRequestSchema = z.object({ message: z.string().trim().max(300).nullish() });
 export const cancelSchema = z.object({
   reason: z.string().trim().max(300).nullish(),

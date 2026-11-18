@@ -6,7 +6,7 @@ import { withDeadlockRetry } from '../../lib/db-errors';
 import { lockMatch } from '../../lib/locks';
 import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
-import type { attendanceSchema } from './matches.schemas';
+import type { attendanceSchema, listRequestsQuery } from './matches.schemas';
 import type { Actor } from '../../types/actor';
 import { getMatch, hasScheduleConflict, isAdminOverride, isSuspended, loadManageableMatch, loadViewableMatch } from './matches.service';
 
@@ -53,15 +53,19 @@ export async function withdrawRequest(actor: Actor, matchId: string): Promise<vo
 }
 
 /** Organizer view of pending requests, each flagged when the player already has a conflicting confirmed match (the other match is never revealed). */
-export async function listPendingRequests(actor: Actor, matchId: string) {
+export async function listPendingRequests(actor: Actor, matchId: string, q: z.infer<typeof listRequestsQuery> = { page: 1, pageSize: 20 }) {
   const m = await loadManageableMatch(matchId, actor);
-  const requests = await prisma.matchRequest.findMany({
+  // Paged (ML-01): oldest first with the id as tie-break, so pages are stable. One extra row tells whether another page exists (no count query).
+  const rows = await prisma.matchRequest.findMany({
     where: { matchId, status: 'PENDING' },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    skip: (q.page - 1) * q.pageSize,
+    take: q.pageSize + 1,
     include: { user: { ...userSummary, select: { ...userSummary.select, playerProfile: { include: { positions: true } } } } },
   });
 
-  // Generic "has a conflicting match" flag only; which match is never revealed.
+  const requests = rows.slice(0, q.pageSize);
+  // Generic "has a conflicting match" flag only (looked up for the players on this page only); which match is never revealed.
   const conflicting = await prisma.matchParticipant.findMany({
     where: {
       userId: { in: requests.map((r) => r.userId) },
@@ -73,6 +77,9 @@ export async function listPendingRequests(actor: Actor, matchId: string) {
   const conflictIds = new Set(conflicting.map((c) => c.userId));
 
   return {
+    page: q.page,
+    pageSize: q.pageSize,
+    hasMore: rows.length > q.pageSize,
     requests: requests.map((r) => ({
       id: r.id,
       message: r.message,
