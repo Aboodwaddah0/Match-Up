@@ -248,6 +248,11 @@ export async function myInvitations(actor: Actor) {
  * The invitee accepts or declines. An expired invitation is marked EXPIRED and refused. The answer is an atomic claim
  * (`updateMany ... WHERE status = PENDING`), so only one of two concurrent answers wins; accepting re-checks the team size
  * inside the same transaction and adds the member.
+ * Concurrency: the claim only serializes answers to the SAME invitation. Two different invitees accepting at the same time would both count
+ * 29 members and both join, so accepting first locks the TEAM row (parent row first, like lockMatch). Everyone who joins the same team
+ * queues behind it, the count is taken after the lock (READ COMMITTED sees the previous commit), and a loser throws TEAM_FULL, which rolls back
+ * its invitation claim: the invitation stays PENDING. No other team operation takes this lock together with another one, so it cannot deadlock
+ * (leave / remove lock match rows, a captaincy transfer locks one member row).
  */
 export async function respondToInvitation(actor: Actor, invitationId: string, decision: 'accept' | 'decline') {
   const inv = await prisma.teamInvitation.findUnique({ where: { id: invitationId }, include: { team: { select: { name: true } } } });
@@ -259,6 +264,7 @@ export async function respondToInvitation(actor: Actor, invitationId: string, de
   }
 
   await prisma.$transaction(async (tx) => {
+    if (decision === 'accept') await tx.$queryRaw`SELECT id FROM team WHERE id = ${inv.teamId}::uuid FOR NO KEY UPDATE`;
     // Atomic claim: only one concurrent answer wins.
     const claimed = await tx.teamInvitation.updateMany({
       where: { id: invitationId, status: 'PENDING' },

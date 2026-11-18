@@ -65,9 +65,16 @@ async function loadAccess(conversationId: string, userId: string): Promise<Acces
 // ───────────────────────── opening a conversation ─────────────────────────
 
 export async function openMatchChat(actor: Actor, matchId: string) {
-  const m = await prisma.match.findUnique({ where: { id: matchId }, select: { id: true } });
-  const conv = m ? await prisma.conversation.upsert({ where: { matchId }, create: { type: 'MATCH', matchId }, update: {} }) : null;
-  if (!conv || !(await memberIds(conv)).includes(actor.userId)) throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
+  // Authorize first: a caller who is not in the match (the organizer or a CONFIRMED player, the same rule as memberIds) must not cause any write.
+  // Same 404 for an unknown match and for a stranger, so it reveals nothing. A cancelled or finished match is still opened (read-only history).
+  const isMember = await prisma.match.count({
+    where: { id: matchId, OR: [{ organizerId: actor.userId }, { participants: { some: { userId: actor.userId, status: 'CONFIRMED' } } }] },
+  });
+  if (!isMember) throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
+  // INSERT ... ON CONFLICT DO NOTHING then read: race-safe (a Prisma upsert with an empty update is not atomic and can fail with a unique
+  // violation when two members open the chat for the first time at once).
+  await prisma.conversation.createMany({ data: [{ type: 'MATCH', matchId }], skipDuplicates: true });
+  const conv = await prisma.conversation.findUniqueOrThrow({ where: { matchId }, select: { id: true } });
   return { conversationId: conv.id };
 }
 
