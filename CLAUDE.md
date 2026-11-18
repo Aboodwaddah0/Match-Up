@@ -42,7 +42,7 @@ Database design (pre-ERD): [DATABASE_DESIGN.md](DATABASE_DESIGN.md).
 9. E-mail: SMTP via nodemailer (SMTP_URL, MAIL_FROM; provider-agnostic). Sent through a transactional outbox (`mail_outbox`) by a worker (MAIL_WORKER_ENABLED): atomic with register / resend / forgot-password, retries with backoff, at-least-once (duplicates possible), token stored encrypted (dedicated MAIL_OUTBOX_ENCRYPTION_KEY, required in production) and wiped after use.
 10. Admin: user search / suspend / reactivate (immediate, sessions revoked), venue suspend / reactivate, counters, report triage.
 11. Chat: match / team / direct conversations (membership derived live from match participants / team members), message history with cursor, unread counts, read-only after cancel or 7 days post-match, Socket.IO push (message:new). DMs only between people sharing a match or team (my default, easy to loosen).
-300 integration tests pass (run `cd backend && npm test`); verified in Docker.
+544 integration tests pass (run `cd backend && npm test`); verified in Docker.
 
 **Not started:** image upload, mobile app.
 
@@ -50,8 +50,8 @@ Database design (pre-ERD): [DATABASE_DESIGN.md](DATABASE_DESIGN.md).
 
 **Audit P0 done (2026-11-17):** owner cannot lift an admin venue suspension (403 VENUE_SUSPENDED); auth rate limits per endpoint and per account (middleware/rate-limit.ts, in-memory per instance, TRUST_PROXY=1 behind a proxy); e-mail link targets configurable (VERIFY_EMAIL_URL / RESET_PASSWORD_URL, decide the final deep link / web page); reliability ignores no-shows and late cancellations on CANCELLED or CLOSED_UNCONFIRMED matches (D16); nodemailer 10 + `npm run audit:prod` gate with a documented Prisma-CLI exception (until Prisma 7). Remaining audit items P1/P2/P3 are not done.
 
-**Audit Phase 1 done, uncommitted (2026-11-17; details in AUDIT_NOTES.md):** match row locked first everywhere (`lib/locks.ts`) + deadlock retry; lazy match start; isolated, bounded sweepers; body errors are 4xx; request id (`X-Request-Id`, `requestId` in errors); graceful shutdown (`SHUTDOWN_TIMEOUT_MS`) and production config guards; staff delegation rules; websocket revalidation (`lib/realtime.ts`); global + per-user creation rate limits; paginated one-query inbox (`GET /chats?limit&before`). Phases 2 (migrations) and 3 (dependencies/infrastructure) not started.
+**Audit Phase 1 done (commit `60e7cd4`; details in AUDIT_NOTES.md):** match row locked first everywhere (`lib/locks.ts`) + deadlock retry; lazy match start; isolated, bounded sweepers; body errors are 4xx; request id (`X-Request-Id`, `requestId` in errors); graceful shutdown (`SHUTDOWN_TIMEOUT_MS`) and production config guards; staff delegation rules; websocket revalidation (`lib/realtime.ts`); global + per-user creation rate limits; paginated one-query inbox (`GET /chats?limit&before`). Phases 2 (migrations) and 3 (dependencies/infrastructure) not started.
 
-**Phase 2 (migrations, in progress):** AUD-01 admin audit log committed (`49bc01f`; append-only `admin_audit_log`, read endpoint `GET /admin/audit-log`; gaps listed in README: attendance, join-request decisions, participant removal, venue management). MAIL-01 / AUTH-02 e-mail outbox implemented, uncommitted until approved. NOTIF-01, BIZ-02, PRIV-01 and Phase 3 not started.
+**Phase 2 (migrations, in progress):** committed: AUD-01 admin audit log (`49bc01f`), MAIL-01 / AUTH-02 e-mail outbox (`7c2c63e`), NOTIF-01 Expo push (`65f300b`). AUD-02 (admin participation overrides recorded in the audit log, booking id in the cancel record) completed. Admin venue management is still not audited. BIZ-02 (D19), PRIV-01 (D18) and Phase 3 (Sentry, infrastructure) not started.
 
 **Gotchas:** on Windows, run `docker compose restart api` after editing source (file watching does not reach the container). Heredocs with long text get truncated in the shell tool: write scripts to files instead.

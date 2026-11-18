@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { recordAdminAudit } from '../../lib/audit';
 import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { withDeadlockRetry } from '../../lib/db-errors';
@@ -7,7 +8,7 @@ import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
 import type { attendanceSchema } from './matches.schemas';
 import type { Actor } from '../../types/actor';
-import { getMatch, hasScheduleConflict, loadManageableMatch, loadViewableMatch } from './matches.service';
+import { getMatch, hasScheduleConflict, isAdminOverride, loadManageableMatch, loadViewableMatch } from './matches.service';
 
 /*
  * Requests (the ASK, pending) and participants (CONFIRMED members) are different tables.
@@ -93,8 +94,10 @@ export async function listPendingRequests(actor: Actor, matchId: string) {
  * the lock and two simultaneous accepts cannot overbook. The overlap exclusion constraint stops the same player being
  * confirmed in two overlapping matches; when two organizers do that at once, Postgres aborts one transaction as a
  * deadlock victim, so the whole transaction is retried (see withDeadlockRetry) and ends in a clean 409 SCHEDULE_CONFLICT.
+ * An admin deciding a request of a match they do not organize leaves an audit record (AUD-02), written in the same transaction and
+ * only when the request really moves out of PENDING (the status is read under the match lock, so two simultaneous decisions leave ONE record).
  */
-export async function decideRequest(actor: Actor, matchId: string, requestId: string, decision: 'accept' | 'reject') {
+export async function decideRequest(actor: Actor, matchId: string, requestId: string, decision: 'accept' | 'reject', httpRequestId?: string) {
   const m = await loadManageableMatch(matchId, actor);
   const request = await prisma.matchRequest.findFirst({ where: { id: requestId, matchId } });
   if (!request) throw new AppError(404, 'REQUEST_NOT_FOUND', 'Request not found');
@@ -104,6 +107,7 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
   await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
     // Match row first, then the request (same order as cancel / start): without this, accept vs cancel deadlocked.
     await lockMatch(tx, matchId);
+    const before = await tx.matchRequest.findUnique({ where: { id: requestId }, select: { status: true } });
     await tx.matchRequest.update({
       where: { id: requestId },
       data: { status: decision === 'accept' ? 'ACCEPTED' : 'REJECTED', decidedById: actor.userId },
@@ -119,8 +123,22 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
         await tx.matchParticipant.create({ data: { matchId, userId: request.userId, requestId } });
       }
     }
-    await notify(tx, [request.userId], decision === 'accept' ? 'MATCH_REQUEST_ACCEPTED' : 'MATCH_REQUEST_REJECTED',
-      { matchId, title: m.title }, { type: 'match', id: matchId });
+    if (isAdminOverride(actor, m.organizerId) && before?.status === 'PENDING') {
+      await recordAdminAudit(tx, {
+        actorId: actor.userId,
+        action: decision === 'accept' ? 'JOIN_REQUEST_ACCEPTED_BY_ADMIN' : 'JOIN_REQUEST_REJECTED_BY_ADMIN',
+        targetType: 'MATCH',
+        targetId: matchId,
+        metadata: { fromStatus: 'PENDING', toStatus: decision === 'accept' ? 'ACCEPTED' : 'REJECTED', organizerId: m.organizerId, requestId, subjectUserId: request.userId },
+        requestId: httpRequestId,
+      });
+    }
+    // `before` was read under the match lock: only the transaction that really performs PENDING -> decided tells the player. A second,
+    // simultaneous decision of the same kind finds the request already decided, changes nothing and says nothing.
+    if (before?.status === 'PENDING') {
+      await notify(tx, [request.userId], decision === 'accept' ? 'MATCH_REQUEST_ACCEPTED' : 'MATCH_REQUEST_REJECTED',
+        { matchId, title: m.title }, { type: 'match', id: matchId });
+    }
   }));
 
   return { match: await getMatch(actor, matchId) };
@@ -169,26 +187,44 @@ export async function leaveMatch(actor: Actor, matchId: string) {
 }
 
 /** The organizer removes a confirmed player before the start: status REMOVED, not a late cancellation, no penalty for the player. */
-export async function removeParticipant(actor: Actor, matchId: string, userId: string): Promise<void> {
+export async function removeParticipant(actor: Actor, matchId: string, userId: string, httpRequestId?: string): Promise<void> {
   const m = await loadManageableMatch(matchId, actor);
   await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
     await lockMatch(tx, matchId);
     const p = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId } } });
     if (!p || p.status !== 'CONFIRMED') throw new AppError(404, 'NOT_A_PARTICIPANT', 'This player is not confirmed in the match');
     await tx.matchParticipant.update({ where: { id: p.id }, data: { status: 'REMOVED' } }); // not a late cancellation, no penalty
+    if (isAdminOverride(actor, m.organizerId)) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'PARTICIPANT_REMOVED_BY_ADMIN', targetType: 'MATCH', targetId: matchId, metadata: { fromStatus: 'CONFIRMED', toStatus: 'REMOVED', organizerId: m.organizerId, subjectUserId: userId }, requestId: httpRequestId });
+    }
     await notify(tx, [userId], 'MATCH_REMOVED', { matchId, title: m.title }, { type: 'match', id: matchId });
   }));
 }
 
-/** No-shows are recorded by the organizer after the start (D4); the DB refuses it earlier. */
-export async function setAttendance(actor: Actor, matchId: string, userId: string, status: z.infer<typeof attendanceSchema>['status']) {
-  await loadManageableMatch(matchId, actor);
+/**
+ * No-shows are recorded by the organizer after the start (D4); the DB refuses it earlier. Attendance feeds the reliability score, so an
+ * admin marking it on a match they do not organize leaves an audit record (AUD-02), in the same transaction and only when something
+ * actually changes: the status, or who confirmed it (an admin re-confirming the same status replaces the organizer as confirmer, which is a
+ * real change). The same status by the same confirmer is a no-op and is not recorded.
+ */
+export async function setAttendance(actor: Actor, matchId: string, userId: string, status: z.infer<typeof attendanceSchema>['status'], httpRequestId?: string) {
+  const m = await loadManageableMatch(matchId, actor);
   const p = await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
     await lockMatch(tx, matchId); // the participant trigger locks the match row; take it first so the order is always match -> participant
-    return tx.matchParticipant.update({
-      where: { matchId_userId: { matchId, userId } },
-      data: { attendanceStatus: status, attendanceConfirmedById: actor.userId },
-    });
+    const where = { matchId_userId: { matchId, userId } };
+    const before = await tx.matchParticipant.findUnique({ where, select: { attendanceStatus: true, attendanceConfirmedById: true } });
+    const updated = await tx.matchParticipant.update({ where, data: { attendanceStatus: status, attendanceConfirmedById: actor.userId } });
+    if (isAdminOverride(actor, m.organizerId) && before && (before.attendanceStatus !== status || before.attendanceConfirmedById !== actor.userId)) {
+      await recordAdminAudit(tx, {
+        actorId: actor.userId,
+        action: status === 'ATTENDED' ? 'PARTICIPANT_ATTENDED_BY_ADMIN' : 'PARTICIPANT_NO_SHOW_BY_ADMIN',
+        targetType: 'MATCH',
+        targetId: matchId,
+        metadata: { fromStatus: before.attendanceStatus, toStatus: status, organizerId: m.organizerId, subjectUserId: userId },
+        requestId: httpRequestId,
+      });
+    }
+    return updated;
   }));
   return { userId, attendanceStatus: p.attendanceStatus };
 }
@@ -196,7 +232,7 @@ export async function setAttendance(actor: Actor, matchId: string, userId: strin
 // ───────────────────────── invitations (private matches, D8) ─────────────────────────
 
 /** The organizer invites a user (needed for PRIVATE matches). Re-inviting refreshes the pending invitation; blocked users look like non-existent ones. */
-export async function inviteUser(actor: Actor, matchId: string, inviteeId: string): Promise<void> {
+export async function inviteUser(actor: Actor, matchId: string, inviteeId: string, httpRequestId?: string): Promise<void> {
   const m = await loadManageableMatch(matchId, actor);
   if (!['OPEN', 'FULL'].includes(m.status)) throw new AppError(409, 'INVALID_STATE', 'This match no longer takes invitations');
   if (inviteeId === m.organizerId) throw new AppError(400, 'INVALID_INVITEE', 'You organize this match');
@@ -206,11 +242,22 @@ export async function inviteUser(actor: Actor, matchId: string, inviteeId: strin
   if (!invitee || invitee.status !== 'ACTIVE' || blocked) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
 
   await prisma.$transaction(async (tx) => {
+    // Match row first, like every other participation change: the admin audit decision below ("did anything change?") must not race
+    // with another invitation of the same player.
+    await lockMatch(tx, matchId);
+    const where = { matchId_inviteeId: { matchId, inviteeId } };
+    const before = await tx.matchInvitation.findUnique({ where, select: { status: true, invitedById: true } });
     await tx.matchInvitation.upsert({
-      where: { matchId_inviteeId: { matchId, inviteeId } },
+      where,
       create: { matchId, inviteeId, invitedById: actor.userId },
       update: { status: 'PENDING', invitedById: actor.userId },
     });
-    await notify(tx, [inviteeId], 'MATCH_INVITATION', { matchId, title: m.title, invitedBy: actor.userId }, { type: 'match', id: matchId });
+    // New, renewed (it was not pending) or taken over by someone else = a real change. Inviting again with nothing different is not:
+    // it is neither recorded in the admin audit log nor announced to the invitee a second time.
+    const changed = !before || before.status !== 'PENDING' || before.invitedById !== actor.userId;
+    if (isAdminOverride(actor, m.organizerId) && changed) {
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'MATCH_INVITATION_SENT_BY_ADMIN', targetType: 'MATCH', targetId: matchId, metadata: { fromStatus: before?.status ?? null, toStatus: 'PENDING', organizerId: m.organizerId, subjectUserId: inviteeId }, requestId: httpRequestId });
+    }
+    if (changed) await notify(tx, [inviteeId], 'MATCH_INVITATION', { matchId, title: m.title, invitedBy: actor.userId }, { type: 'match', id: matchId });
   });
 }

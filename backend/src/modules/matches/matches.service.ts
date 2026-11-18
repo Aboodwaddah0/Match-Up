@@ -191,10 +191,10 @@ async function markAdminActor(tx: Prisma.TransactionClient, actor: Actor): Promi
 }
 
 /**
- * An admin acting on a match they do NOT organize (AUD-01: cancel, complete / recover and edit are recorded). An admin managing their own match is an ordinary organizer action and
+ * An admin acting on a match they do NOT organize (AUD-01: cancel, complete / recover and edit are recorded; AUD-02: participation, see participation.service.ts). An admin managing their own match is an ordinary organizer action and
  * is not logged as an override.
  */
-function isAdminOverride(actor: Actor, organizerId: string): boolean {
+export function isAdminOverride(actor: Actor, organizerId: string): boolean {
   return actor.role === 'ADMIN' && actor.userId !== organizerId;
 }
 
@@ -429,11 +429,12 @@ export async function cancelMatch(actor: Actor, id: string, reason?: string | nu
     await markAdminActor(tx, actor);
     // DB trigger: participants -> MATCH_CANCELLED (slots freed, no penalty), pending requests/invitations expire.
     await tx.match.update({ where: { id }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason ?? undefined } });
+    // The booking is released BEFORE the audit record is written, so the record can name it (only when one was really released).
+    const releasedBookingId = releaseBooking && m.bookingId && (await releaseBookingForMatch(tx, actor, m.bookingId)) ? m.bookingId : null;
     if (isAdminOverride(actor, m.organizerId)) {
-      await recordAdminAudit(tx, { actorId: actor.userId, action: 'MATCH_CANCELLED_BY_ADMIN', targetType: 'MATCH', targetId: id, reason, metadata: { fromStatus, toStatus: 'CANCELLED', organizerId: m.organizerId }, requestId });
+      await recordAdminAudit(tx, { actorId: actor.userId, action: 'MATCH_CANCELLED_BY_ADMIN', targetType: 'MATCH', targetId: id, reason, metadata: { fromStatus, toStatus: 'CANCELLED', organizerId: m.organizerId, ...(releasedBookingId ? { bookingId: releasedBookingId } : {}) }, requestId });
     }
     await recordEvent(tx, id, actor.userId, fromStatus, 'CANCELLED', reason);
-    if (releaseBooking && m.bookingId) await releaseBookingForMatch(tx, actor, m.bookingId);
     await notify(tx, [...participants, ...requests].map((r) => r.userId).filter((u) => u !== actor.userId), 'MATCH_CANCELLED',
       { matchId: id, title: m.title, reason: reason ?? null }, { type: 'match', id });
   }));

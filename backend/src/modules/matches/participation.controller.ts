@@ -22,12 +22,12 @@ export const listRequests = async (req: Request, res: Response) => {
 
 export const acceptRequest = async (req: Request, res: Response) => {
   const { matchId, requestId } = valid(req, 'params', requestParams);
-  res.json(await participation.decideRequest(actorOf(req), matchId, requestId, 'accept'));
+  res.json(await participation.decideRequest(actorOf(req), matchId, requestId, 'accept', String(req.id)));
 };
 
 export const rejectRequest = async (req: Request, res: Response) => {
   const { matchId, requestId } = valid(req, 'params', requestParams);
-  res.json(await participation.decideRequest(actorOf(req), matchId, requestId, 'reject'));
+  res.json(await participation.decideRequest(actorOf(req), matchId, requestId, 'reject', String(req.id)));
 };
 
 // ── participants (CONFIRMED membership) ──
@@ -41,18 +41,18 @@ export const leave = async (req: Request, res: Response) => {
 
 export const removeParticipant = async (req: Request, res: Response) => {
   const { matchId, userId } = valid(req, 'params', participantParams);
-  await participation.removeParticipant(actorOf(req), matchId, userId);
+  await participation.removeParticipant(actorOf(req), matchId, userId, String(req.id));
   res.status(204).end();
 };
 
 export const setAttendance = async (req: Request, res: Response) => {
   const { matchId, userId } = valid(req, 'params', participantParams);
-  res.json(await participation.setAttendance(actorOf(req), matchId, userId, valid(req, 'body', attendanceSchema).status));
+  res.json(await participation.setAttendance(actorOf(req), matchId, userId, valid(req, 'body', attendanceSchema).status, String(req.id)));
 };
 
 // ── invitations (private matches are invite-only) ──
 export const invite = async (req: Request, res: Response) => {
   const { matchId } = valid(req, 'params', matchIdParams);
-  await participation.inviteUser(actorOf(req), matchId, valid(req, 'body', inviteSchema).userId);
+  await participation.inviteUser(actorOf(req), matchId, valid(req, 'body', inviteSchema).userId, String(req.id));
   res.status(201).json({ invited: true });
 };

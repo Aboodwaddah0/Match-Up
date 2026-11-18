@@ -76,16 +76,18 @@ async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingId: stri
  * Used when a match is cancelled with `releaseBooking: true`: cancels the organizer's own IN_APP booking so the venue
  * slot is freed, and tells the venue managers. Runs inside the match-cancel transaction, so the match and its booking
  * change together or not at all. EXTERNAL bookings are never cancelled here (nothing to free), and a booking that is
- * not the caller's (or already finished) is silently left alone.
+ * not the caller's (or already finished) is silently left alone. Returns true only when a booking was actually cancelled (the
+ * admin audit record of a match cancellation names it).
  */
-export async function releaseBookingForMatch(tx: Prisma.TransactionClient, actor: Actor, bookingId: string): Promise<void> {
+export async function releaseBookingForMatch(tx: Prisma.TransactionClient, actor: Actor, bookingId: string): Promise<boolean> {
   const b = await tx.booking.findUnique({ where: { id: bookingId }, include: { field: { select: { venueId: true } } } });
-  if (!b || b.source !== 'IN_APP' || !['PENDING', 'CONFIRMED'].includes(b.status)) return;
-  if (b.createdById !== actor.userId && actor.role !== 'ADMIN') return;
+  if (!b || b.source !== 'IN_APP' || !['PENDING', 'CONFIRMED'].includes(b.status)) return false;
+  if (b.createdById !== actor.userId && actor.role !== 'ADMIN') return false;
   await tx.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: 'match cancelled' } });
   await event(tx, bookingId, actor.userId, b.status, 'CANCELLED', 'match cancelled');
   const managers = (await bookingManagerIds(b.field!.venueId, tx)).filter((u) => u !== actor.userId);
   await notify(tx, managers, 'BOOKING_CANCELLED', { bookingId, byVenue: false, reason: 'match cancelled', startAt: b.startAt.toISOString() }, { type: 'booking', id: bookingId });
+  return true;
 }
 
 // ───────────────────────── requester side ─────────────────────────
