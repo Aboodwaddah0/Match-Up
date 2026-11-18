@@ -130,7 +130,17 @@ export async function loadMatch(id: string): Promise<MatchRow> {
   return m;
 }
 
-/** Private matches exist only for the organizer, invited players, requesters, participants and admins. Blocked users never see each other's matches. */
+/** Is this account suspended? (SEC-01) Read on its own so the account status never travels in MatchRow or any DTO. */
+export async function isSuspended(userId: string): Promise<boolean> {
+  return (await prisma.user.count({ where: { id: userId, status: 'SUSPENDED' } })) > 0;
+}
+
+/**
+ * Private matches exist only for the organizer, invited players, requesters, participants and admins. Blocked users never see each other's matches.
+ * SEC-01: the matches of a SUSPENDED organizer are hidden the same way (404 for outsiders), whatever their visibility, for OPEN_MATCH and
+ * TEAM_CHALLENGE alike; people already related to the match (participants, requesters, invitees, the captain of either team of a challenge) and admins keep seeing it. Nothing is
+ * cancelled or expired, so reactivating the organizer restores the normal behaviour.
+ */
 export async function loadViewableMatch(id: string, actor: Actor): Promise<MatchRow> {
   const m = await loadMatch(id);
   const notFound = new AppError(404, 'MATCH_NOT_FOUND', 'Match not found');
@@ -138,7 +148,7 @@ export async function loadViewableMatch(id: string, actor: Actor): Promise<Match
 
   if (await areBlocked(m.organizerId, actor.userId)) throw notFound; // a block hides the match entirely
 
-  if (m.visibility === 'PRIVATE') {
+  if (m.visibility === 'PRIVATE' || (await isSuspended(m.organizerId))) {
     const related = await prisma.match.count({
       where: {
         id,
@@ -146,6 +156,7 @@ export async function loadViewableMatch(id: string, actor: Actor): Promise<Match
           { participants: { some: { userId: actor.userId } } },
           { requests: { some: { userId: actor.userId } } },
           { invitations: { some: { inviteeId: actor.userId } } },
+          { teams: { some: { team: { members: { some: { userId: actor.userId, role: 'CAPTAIN' } } } } } }, // a team challenge: either side's current captain (view only)
         ],
       },
     });
@@ -465,7 +476,7 @@ export async function completeMatch(actor: Actor, id: string, requestId?: string
 // ───────────────────────── discovery ─────────────────────────
 
 /**
- * Public discovery of open matches. Hides private matches, matches already started, and matches of organizers who have
+ * Public discovery of open matches. Hides private matches, matches already started, matches of suspended organizers, and matches of organizers who have
  * a block with the viewer. With lat/lng it sorts by distance, using `earth_box` (index-friendly) before the exact
  * `earth_distance` check, same technique as venue search.
  */
@@ -474,6 +485,7 @@ export async function searchMatches(actor: Actor, q: z.infer<typeof searchSchema
     Prisma.sql`m.type = 'OPEN_MATCH'`,
     Prisma.sql`m.visibility = 'PUBLIC'`,
     Prisma.sql`m.start_at > now()`,
+    Prisma.sql`NOT EXISTS (SELECT 1 FROM "user" o WHERE o.id = m.organizer_id AND o.status = 'SUSPENDED')`, // SEC-01
     q.includeFull ? Prisma.sql`m.status IN ('OPEN', 'FULL')` : Prisma.sql`m.status = 'OPEN'`,
     Prisma.sql`NOT EXISTS (SELECT 1 FROM blocked_user b WHERE (b.blocker_id = m.organizer_id AND b.blocked_id = ${actor.userId}::uuid) OR (b.blocker_id = ${actor.userId}::uuid AND b.blocked_id = m.organizer_id))`,
   ];

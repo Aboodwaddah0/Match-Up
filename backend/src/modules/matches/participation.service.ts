@@ -8,7 +8,7 @@ import { prisma } from '../../lib/prisma';
 import { notify } from '../notifications/notify';
 import type { attendanceSchema } from './matches.schemas';
 import type { Actor } from '../../types/actor';
-import { getMatch, hasScheduleConflict, isAdminOverride, loadManageableMatch, loadViewableMatch } from './matches.service';
+import { getMatch, hasScheduleConflict, isAdminOverride, isSuspended, loadManageableMatch, loadViewableMatch } from './matches.service';
 
 /*
  * Requests (the ASK, pending) and participants (CONFIRMED members) are different tables.
@@ -33,6 +33,8 @@ export async function createRequest(actor: Actor, matchId: string, message?: str
   const scheduleConflict = await hasScheduleConflict(m, actor.userId); // warning only (D3)
 
   const request = await prisma.$transaction(async (tx) => {
+    // SEC-01: a suspended organizer takes no new requests, not even from an invited player (the match stays visible to people related to it).
+    if (await isSuspended(m.organizerId)) throw new AppError(409, 'ORGANIZER_UNAVAILABLE', 'The organizer of this match is currently unavailable');
     // DB trigger: OPEN_MATCH only, status OPEN, not started, not own match, invited if private, not blocked, no duplicate.
     const r = await tx.matchRequest.create({ data: { matchId, userId: actor.userId, message: message ?? undefined } });
     await notify(tx, [m.organizerId], 'MATCH_REQUEST_RECEIVED', { matchId, title: m.title, requestId: r.id, userId: actor.userId }, { type: 'match', id: matchId });
@@ -108,6 +110,11 @@ export async function decideRequest(actor: Actor, matchId: string, requestId: st
     // Match row first, then the request (same order as cancel / start): without this, accept vs cancel deadlocked.
     await lockMatch(tx, matchId);
     const before = await tx.matchRequest.findUnique({ where: { id: requestId }, select: { status: true } });
+    // SEC-01: a suspended player is not accepted into a match. Checked under the match lock and before any write, so a refusal leaves the
+    // request PENDING and creates no participant, notification or audit record. Existing confirmed participations are not touched.
+    if (decision === 'accept' && (await tx.user.count({ where: { id: request.userId, status: 'SUSPENDED' } })) > 0) {
+      throw new AppError(409, 'PLAYER_UNAVAILABLE', 'This player is currently unavailable');
+    }
     await tx.matchRequest.update({
       where: { id: requestId },
       data: { status: decision === 'accept' ? 'ACCEPTED' : 'REJECTED', decidedById: actor.userId },
