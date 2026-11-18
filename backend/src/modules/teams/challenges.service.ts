@@ -14,6 +14,8 @@ import { myRole, requireStaff, staffIds } from './teams.service';
  * Team challenge (D9): accepting creates ONE TEAM_CHALLENGE match (starts SCHEDULED) with two MatchTeam
  * sides (HOME = challenger, AWAY = challenged). There is no open recruitment and no join requests:
  * each side's captain / vice captain picks the roster from their own team (match_participant rows).
+ * D19 (BIZ-02): only the CAPTAIN of the challenging team can create a challenge, and that captain (remembered in
+ * team_challenge.organizer_id) is the match organizer, whatever happens to the captaincy afterwards. There is no organizer transfer.
  */
 
 const FORMAT_SIZE = { F5: 5, F7: 7, F11: 11 } as const;
@@ -27,7 +29,8 @@ const teamSummary = { select: { id: true, name: true, logoUrl: true } } as const
 // ───────────────────────── challenges ─────────────────────────
 
 export async function createChallenge(actor: Actor, teamId: string, input: z.infer<typeof createChallengeSchema>) {
-  await requireStaff(teamId, actor);
+  const role = await requireStaff(teamId, actor); // 404 / 403 for non-staff as before
+  if (role !== 'CAPTAIN') throw new AppError(403, 'FORBIDDEN', 'Only the team captain can create a challenge'); // D19: the creator becomes the organizer
   if (input.challengedTeamId === teamId) throw new AppError(400, 'INVALID_TARGET', 'A team cannot challenge itself');
 
   const startAt = new Date(input.proposedStartAt);
@@ -47,7 +50,7 @@ export async function createChallenge(actor: Actor, teamId: string, input: z.inf
   const expiresAt = new Date(Math.min(Date.now() + CHALLENGE_TTL_DAYS * DAY, startAt.getTime() - 5 * MINUTE));
   const c = await prisma.$transaction(async (tx) => {
     const row = await tx.teamChallenge.create({
-      data: { challengerTeamId: teamId, challengedTeamId: input.challengedTeamId, format: input.format, proposedStartAt: startAt, message: input.message ?? undefined, expiresAt },
+      data: { challengerTeamId: teamId, challengedTeamId: input.challengedTeamId, format: input.format, proposedStartAt: startAt, message: input.message ?? undefined, expiresAt, organizerId: actor.userId },
     });
     await notify(tx, await staffIds(tx, input.challengedTeamId), 'CHALLENGE_RECEIVED',
       { challengeId: row.id, challengerTeamId: teamId, challengerName: challenger.name, startAt: startAt.toISOString() }, { type: 'challenge', id: row.id });
@@ -113,23 +116,43 @@ async function loadPending(challengeId: string) {
 /**
  * The challenged team's staff accept. In ONE transaction: claim the challenge atomically (so a concurrent accept / reject /
  * cancel yields exactly one winner), create the TEAM_CHALLENGE match (SCHEDULED) with its two sides, link it back, and
- * notify the challenger. The DB checks at COMMIT that the match really has two sides. The challenger's captain becomes
- * the organizer because a match has a single organizer.
+ * notify the challenger. The DB checks at COMMIT that the match really has two sides. The organizer is the captain who CREATED the
+ * challenge (D19), even if someone else captains the team now. If that person is no longer an active member of the challenging team
+ * (left, suspended or deleted) the acceptance is refused with 409 CHALLENGE_ORGANIZER_UNAVAILABLE: nobody is assigned instead and the
+ * challenging team must send a new challenge. A challenge created before the organizer was recorded keeps the old rule (captain now).
  */
 export async function acceptChallenge(actor: Actor, challengeId: string) {
   const c = await loadPending(challengeId);
   await requireStaff(c.challengedTeamId, actor);
 
-  const [challenger, challenged, captain] = await Promise.all([
+  const [challenger, challenged, currentCaptain] = await Promise.all([
     prisma.team.findUniqueOrThrow({ where: { id: c.challengerTeamId }, select: { name: true, cityId: true, _count: { select: { members: true } } } }),
     prisma.team.findUniqueOrThrow({ where: { id: c.challengedTeamId }, select: { name: true, cityId: true, _count: { select: { members: true } } } }),
-    prisma.teamMember.findFirstOrThrow({ where: { teamId: c.challengerTeamId, role: 'CAPTAIN' }, select: { userId: true } }),
+    c.organizerId ? null : prisma.teamMember.findFirstOrThrow({ where: { teamId: c.challengerTeamId, role: 'CAPTAIN' }, select: { userId: true } }), // legacy rows only
   ]);
   const need = FORMAT_SIZE[c.format];
   if (challenged._count.members < need) throw new AppError(409, 'TEAM_TOO_SMALL', `Your team needs at least ${need} players for this format`);
   if (challenger._count.members < need) throw new AppError(409, 'CHALLENGER_TEAM_TOO_SMALL', 'The challenging team no longer has enough players');
 
+  const organizerId = c.organizerId ?? currentCaptain!.userId;
+
   const matchId = await prisma.$transaction(async (tx) => {
+    // D19 / B1: the recorded organizer must be an ACTIVE member of the challenging team, and must STAY one until this transaction commits.
+    // The membership row and the account row are read with FOR SHARE in ONE statement, as the first thing the transaction does:
+    //  - a leave / removal / suspension that committed before is seen (the row no longer qualifies): 409, challenge untouched;
+    //  - one that is still running makes this statement WAIT for it, then re-check: it either committed (409) or rolled back (carry on);
+    //  - one that starts later has to wait for this transaction (its DELETE / UPDATE conflicts with our share lock), so the creator was
+    //    eligible at the moment acceptance was serialized and stays the organizer even if they leave right afterwards.
+    // Lock order: nothing else takes these two rows together with the challenge row (leave and removal lock match rows, then the member row;
+    // suspension locks the user row; a captaincy transfer locks member rows), and this transaction never waits for a match row of an
+    // existing match, so no cycle can form. A legacy challenge without a recorded organizer skips this check.
+    if (c.organizerId) {
+      const eligible = await tx.$queryRaw<{ ok: number }[]>`
+        SELECT 1 AS ok FROM team_member tm JOIN "user" u ON u.id = tm.user_id
+         WHERE tm.team_id = ${c.challengerTeamId}::uuid AND tm.user_id = ${c.organizerId}::uuid AND u.status = 'ACTIVE'
+           FOR SHARE OF tm, u`;
+      if (eligible.length === 0) throw new AppError(409, 'CHALLENGE_ORGANIZER_UNAVAILABLE', 'The captain who created this challenge is no longer available; the challenging team must send a new challenge');
+    }
     // Atomic claim: concurrent accept / reject / cancel -> exactly one wins.
     const claimed = await tx.teamChallenge.updateMany({
       where: { id: challengeId, status: 'PENDING', expiresAt: { gt: new Date() } },
@@ -137,10 +160,10 @@ export async function acceptChallenge(actor: Actor, challengeId: string) {
     });
     if (claimed.count === 0) throw new AppError(409, 'CHALLENGE_ALREADY_DECIDED', 'This challenge was already answered');
 
-    // The challenger's captain organizes the match (the schema has a single organizer). Sides are checked at COMMIT by the DB.
+    // The creating captain organizes the match (the schema has a single organizer). Sides are checked at COMMIT by the DB.
     const m = await tx.match.create({
       data: {
-        organizerId: captain.userId,
+        organizerId,
         type: 'TEAM_CHALLENGE',
         status: 'SCHEDULED',
         visibility: 'PUBLIC',

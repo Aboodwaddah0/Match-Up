@@ -431,7 +431,8 @@ model User {
   teamMemberships   TeamMember[]
   teamInvitesGot    TeamInvitation[] @relation("TeamInviteInvitee")
   teamInvitesSent   TeamInvitation[] @relation("TeamInviteInviter")
-  challengesDecided TeamChallenge[]
+  challengesDecided TeamChallenge[] @relation("ChallengeDecider")
+  challengesOrganized TeamChallenge[] @relation("ChallengeOrganizer")
 
   reviewsWritten  Review[] @relation("Reviewer")
   reviewsReceived Review[] @relation("Reviewed")
@@ -965,11 +966,15 @@ model TeamChallenge {
   decidedById      String?         @map("decided_by_id") @db.Uuid
   decidedAt        DateTime?       @map("decided_at") @db.Timestamptz(6)
   resultingMatchId String?         @unique @map("resulting_match_id") @db.Uuid
+  // BIZ-02 / D19: the captain of the challenging team AT CREATION. Becomes the match organizer when the challenge is accepted. NULL only on
+  // challenges created before this column existed (they keep the old rule: the captain at acceptance).
+  organizerId      String?         @map("organizer_id") @db.Uuid
   createdAt        DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
 
   challenger Team   @relation("ChallengerTeam", fields: [challengerTeamId], references: [id])
   challenged Team   @relation("ChallengedTeam", fields: [challengedTeamId], references: [id])
-  decidedBy  User?  @relation(fields: [decidedById], references: [id])
+  decidedBy  User?  @relation("ChallengeDecider", fields: [decidedById], references: [id])
+  organizer  User?  @relation("ChallengeOrganizer", fields: [organizerId], references: [id], onDelete: Restrict)
   match      Match? @relation(fields: [resultingMatchId], references: [id])
 
   @@index([challengedTeamId, status])

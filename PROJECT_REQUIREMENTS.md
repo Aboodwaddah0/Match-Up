@@ -1194,7 +1194,7 @@ Decided by the product owner after the production-readiness audit (finding PRIV-
 - The sentence "preserve their content" means free text they wrote can still contain personal details; this is accepted by the decision above.
 - API user summaries should expose a `deleted` flag so clients can localize "Deleted user" (Arabic / English).
 - The deletion blocker check needs, at minimum: upcoming matches organized, teams captained with other members, venues owned, and team memberships.
-- "Transfer organizer responsibility" and "transfer venue ownership" do not exist in the system yet. See the open points: whether organizer transfer is built is undecided (D19.4); venue ownership transfer is required by blocker 3 unless the deactivation path is used.
+- "Transfer organizer responsibility" and "transfer venue ownership" do not exist in the system yet. See the open points: organizer transfer is NOT supported (D19, decision B2); venue ownership transfer is required by blocker 3 unless the deactivation path is used.
 
 *Open points (not decided; no rule has been assumed):*
 (a) What counts as "upcoming" for blocker 1 (proposal, not adopted: OPEN, FULL, SCHEDULED, IN_PROGRESS, and CLOSED_UNCONFIRMED while the organizer can still recover it).
@@ -1217,15 +1217,21 @@ Decided by the product owner after the production-readiness audit (finding BIZ-0
 
 **Consequences.** The opposing captain has no right to cancel, reschedule or complete the match; they manage only their own roster. A minimum roster at kick-off is **not** required (no automatic cancellation). An organizer of an upcoming team match cannot delete their account until the match is cancelled or the organizer role is transferred (D18).
 
-*Implications recorded for implementation (not yet built):*
+*Implications recorded for implementation (all built since; the final rules are in the decisions below):*
 - Today the organizer is the challenging team's captain **at acceptance**; the decision requires the captain **at creation**, so the organizer must be remembered when the challenge is created (this will need a schema change).
 - Today a later captaincy transfer does not change the organizer, which already matches decision 2.
 - Today vice captains can manage rosters, which already matches decision 4.
 - Rescheduling a team match is not supported by the code today (only open matches can be edited). The database already allows it under D12 (only while nobody is confirmed), so it would in practice apply only before rosters are filled; both teams should be told.
 
-*Open points (not decided; no rule has been assumed):*
-(a) If the captain who created the challenge is no longer on the challenging team (or is suspended or deleted) when the challenge is accepted, who becomes the organizer?
-(b) Whether an explicit organizer transfer is built at all ("if supported"), and if so who may receive it and whether they must accept. Without it, D18 blocker 1 can only be resolved by cancelling the match.
+**Decisions on the open points (product owner, BIZ-02 review):**
+- **Challenge creation is captain-only.** Only the current captain of the challenging team may create a challenge (a vice captain or a plain member may not). The creating captain's user id is stored with the challenge (`team_challenge.organizer_id`) and is the match organizer once the challenge is accepted.
+- **B1: the creator is no longer eligible at acceptance.** If the stored creator is no longer an **active member** of the challenging team, or their account is **suspended or deleted**, accepting the challenge is refused with **HTTP 409 `CHALLENGE_ORGANIZER_UNAVAILABLE`**. Nobody is assigned instead (the current captain is NOT substituted) and the challenging team must create a new challenge. A creator who is still an active member but is no longer captain **remains the organizer**: captaincy changes never affect ownership.
+- **Serialization.** Acceptance and a change of the creator's eligibility (leaving, removal, suspension) are serialized in the database. If the creator became ineligible before acceptance was serialized, acceptance fails with 409 `CHALLENGE_ORGANIZER_UNAVAILABLE`; if acceptance was serialized first, the creator is the organizer even if they leave or are suspended immediately afterwards.
+- **B2: organizer transfer is NOT supported.** No manual or automatic transfer exists; the organizer is fixed for the life of the match. Consequence for D18 / PRIV-01: **account deletion must resolve every upcoming match the account organizes before anonymization / deletion**; since there is no transfer, the only way to resolve one is to cancel it.
+- **Legacy challenges.** Challenges created before `organizer_id` existed (NULL) keep the earlier rule: the captain of the challenging team at acceptance is the organizer.
+- **Rescheduling (D12 applied to D19).** Only the recorded organizer (or an admin, audited) may reschedule a team match, and only while it is SCHEDULED, before its start, and while **neither roster has a confirmed player** (rosters are confirmed participants). Once either captain or vice captain has picked a player the match cannot be rescheduled and must be cancelled and recreated (a new challenge). Rosters are never modified by a reschedule. The captain and vice captain of **both** teams are notified (existing `MATCH_TIME_CHANGED`), never the organizer who made the change. Editable on a team match: the time, title, description and notes; capacity, skill level, positions, price, location, city and booking link are refused (they do not exist for a team match, D14, or are not defined). A booking linked to the match is independent and untouched; the match may only move inside the booked time.
+
+*Still open (not decided; no rule has been assumed):* location, price and booking-link editing for team matches (D12 names only title, description and notes).
 
 ## D20. Technical Configuration Decisions (2026-11-17)
 Decided by the product owner after the production-readiness audit.

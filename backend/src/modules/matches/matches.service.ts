@@ -341,6 +341,18 @@ export async function timeChangeRecipients(tx: Prisma.TransactionClient, matchId
   return [...new Set([...confirmed, ...pending].map((r) => r.userId))].filter((u) => u !== exceptUserId);
 }
 
+/**
+ * TEAM_CHALLENGE: who must hear that the match moved (D19): the captain and vice captain of BOTH teams, plus anyone confirmed (always empty
+ * at the moment, see timeChangeRecipients), never the person who made the change. Read inside the transaction of the edit.
+ */
+async function teamMatchTimeChangeRecipients(tx: Prisma.TransactionClient, matchId: string, exceptUserId: string): Promise<string[]> {
+  const [staff, others] = await Promise.all([
+    tx.teamMember.findMany({ where: { role: { in: ['CAPTAIN', 'VICE_CAPTAIN'] }, team: { matchSides: { some: { matchId } } } }, select: { userId: true } }),
+    timeChangeRecipients(tx, matchId, exceptUserId),
+  ]);
+  return [...new Set([...staff.map((s) => s.userId), ...others])].filter((u) => u !== exceptUserId);
+}
+
 /** The start / end an edit results in, relative to the match as it is NOW (read under the lock). */
 function resolveEditedTimes(cur: MatchRow, input: z.infer<typeof updateMatchSchema>) {
   const startAt = input.startAt ? new Date(input.startAt) : cur.startAt;
@@ -357,14 +369,30 @@ function resolveEditedTimes(cur: MatchRow, input: z.infer<typeof updateMatchSche
 }
 
 /**
- * Edits an OPEN / FULL open match (organizer or admin). Rules enforced by the DB triggers, so they hold under races:
- * capacity never below the confirmed count and not after start; the time can change only while nobody is confirmed (D12).
- * Pending requesters are notified when the time changes.
+ * What the organizer of a TEAM_CHALLENGE may edit (D12 + D19): the time (rescheduling) and the "other fields" D12 names (title, description,
+ * notes). Capacity, skill level, positions and the like do not exist for a team match (D14); location, price and booking link of a team
+ * match are not defined by any decision, so they are refused rather than guessed.
+ */
+const TEAM_MATCH_EDITABLE = new Set(['title', 'description', 'notes', 'startAt', 'endAt', 'durationMinutes']);
+
+/**
+ * Edits a match (the organizer, or an admin). An OPEN / FULL open match, or a SCHEDULED team challenge (D19: the organizer alone reschedules;
+ * a captain or vice captain gets no organizer rights from their team role). Rules enforced by the DB triggers, so they hold under races:
+ * capacity never below the confirmed count and not after start; the time can change only before the start and while nobody is confirmed
+ * (D12), which for a team match means while NEITHER roster has a confirmed player: rosters are never touched here, so once either captain
+ * has picked anyone the match must be cancelled and recreated (a new challenge). A linked booking must still contain the new time (DB).
+ * Pending requesters are notified when the time of an open match changes; for a team match both teams' captain and vice captain are.
  */
 export async function updateMatch(actor: Actor, id: string, input: z.infer<typeof updateMatchSchema>, requestId?: string) {
   const m = await loadManageableMatch(id, actor);
-  if (m.type !== 'OPEN_MATCH' || !['OPEN', 'FULL'].includes(m.status)) {
-    throw new AppError(409, 'INVALID_STATE', 'Only open matches can be edited');
+  const isTeam = m.type === 'TEAM_CHALLENGE';
+  const editableStates: MatchStatus[] = isTeam ? ['SCHEDULED'] : ['OPEN', 'FULL'];
+  if (!editableStates.includes(m.status)) {
+    throw new AppError(409, 'INVALID_STATE', isTeam ? 'Only a scheduled team match can be edited' : 'Only open matches can be edited');
+  }
+  if (isTeam) {
+    const refused = Object.keys(input).filter((k) => !TEAM_MATCH_EDITABLE.has(k));
+    if (refused.length > 0) throw new AppError(400, 'NOT_EDITABLE_FOR_TEAM_MATCH', `These fields cannot be edited on a team match: ${refused.join(', ')}`);
   }
   await assertCityExists(input.cityId);
   if (input.capacity !== undefined && input.capacity > 2 * FORMAT_SIZE[m.format]) {
@@ -375,7 +403,7 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
     const lockedStatus = await lockMatch(tx, id); // match row first, always (see lib/locks.ts)
     // Everything below works on the row AS LOCKED, never on the copy read before the transaction: another edit, a cancel or a
     // start may have committed in between. The same locked state decides what changed, is updated, and is written to the audit log.
-    if (!['OPEN', 'FULL'].includes(lockedStatus)) throw new AppError(409, 'INVALID_STATE', 'Only open matches can be edited');
+    if (!editableStates.includes(lockedStatus)) throw new AppError(409, 'INVALID_STATE', isTeam ? 'Only a scheduled team match can be edited' : 'Only open matches can be edited');
     const cur = await tx.match.findUniqueOrThrow({ where: { id }, include: matchInclude });
     const { startAt, endAt, timeChanged } = resolveEditedTimes(cur, input);
 
@@ -408,7 +436,8 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
       await tx.matchRequiredPosition.createMany({ data: input.requiredPositions.map((p) => ({ matchId: id, ...p })) });
     }
     if (timeChanged) {
-      await notify(tx, await timeChangeRecipients(tx, id, actor.userId), 'MATCH_TIME_CHANGED', { matchId: id, title: cur.title, startAt: startAt.toISOString() }, { type: 'match', id });
+      const recipients = isTeam ? await teamMatchTimeChangeRecipients(tx, id, actor.userId) : await timeChangeRecipients(tx, id, actor.userId);
+      await notify(tx, recipients, 'MATCH_TIME_CHANGED', { matchId: id, title: cur.title, startAt: startAt.toISOString() }, { type: 'match', id });
     }
   }));
   return getMatch(actor, id);
