@@ -42,6 +42,32 @@ enum AccountStatus {
   @@map("account_status")
 }
 
+enum PushStatus {
+  PENDING
+  SENDING
+  ACCEPTED
+  DELIVERED
+  FAILED
+  CANCELLED
+  UNCONFIRMED
+
+  @@map("push_status")
+}
+
+enum PushChannel {
+  SEND
+  RECEIPT
+
+  @@map("push_channel")
+}
+
+enum PushChannelStatus {
+  OK
+  AUTH_FAILED
+
+  @@map("push_channel_status")
+}
+
 enum MailKind {
   EMAIL_VERIFY
   PASSWORD_RESET
@@ -390,12 +416,13 @@ model User {
   reviewsWritten  Review[] @relation("Reviewer")
   reviewsReceived Review[] @relation("Reviewed")
 
-  notifications Notification[]
-  favorites     Favorite[]
-  reportsFiled  Report[]        @relation("Reporter")
-  reportsSolved Report[]        @relation("ReportResolver")
-  adminAudits   AdminAuditLog[]
-  mailOutbox    MailOutbox[]
+  notifications  Notification[]
+  favorites      Favorite[]
+  reportsFiled   Report[]        @relation("Reporter")
+  reportsSolved  Report[]        @relation("ReportResolver")
+  adminAudits    AdminAuditLog[]
+  mailOutbox     MailOutbox[]
+  pushDeliveries PushDelivery[]
 
   conversations ConversationParticipant[]
   messages      Message[]
@@ -441,7 +468,8 @@ model DeviceToken {
   platform  String
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pushDeliveries PushDelivery[]
 
   @@index([userId])
   @@map("device_token")
@@ -964,9 +992,12 @@ model Notification {
   resourceId   String?   @map("resource_id") @db.Uuid
   readAt       DateTime? @map("read_at") @db.Timestamptz(6)
   pushSentAt   DateTime? @map("push_sent_at") @db.Timestamptz(6)
+  /// NULL = push fan-out not done yet (NOTIF-01). Existing rows were marked done by the migration.
+  pushFanoutAt DateTime? @map("push_fanout_at") @db.Timestamptz(6)
   createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  user User @relation(fields: [userId], references: [id])
+  user           User           @relation(fields: [userId], references: [id])
+  pushDeliveries PushDelivery[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@map("notification")
@@ -1054,6 +1085,62 @@ model MailOutbox {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("mail_outbox")
+}
+
+// ─────────────────────── Push delivery (NOTIF-01) ───────────────────────
+
+/// One push to one device for one notification. Lifecycle, constraints and guarantees: migration 20261118000200_push_delivery.
+model PushDelivery {
+  id                 String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  notificationId     String     @map("notification_id") @db.Uuid
+  userId             String     @map("user_id") @db.Uuid
+  deviceTokenId      String?    @map("device_token_id") @db.Uuid
+  expoToken          String?    @map("expo_token")
+  status             PushStatus @default(PENDING)
+  attempts           Int        @default(0)
+  nextAttemptAt      DateTime   @default(now()) @map("next_attempt_at") @db.Timestamptz(6)
+  lockedUntil        DateTime?  @map("locked_until") @db.Timestamptz(6)
+  claimId            String?    @map("claim_id") @db.Uuid
+  ticketId           String?    @map("ticket_id")
+  ticketAt           DateTime?  @map("ticket_at") @db.Timestamptz(6)
+  receiptAttempts    Int        @default(0) @map("receipt_attempts")
+  nextReceiptAt      DateTime?  @map("next_receipt_at") @db.Timestamptz(6)
+  receiptClaimId     String?    @map("receipt_claim_id") @db.Uuid
+  receiptLockedUntil DateTime?  @map("receipt_locked_until") @db.Timestamptz(6)
+  lastError          String?    @map("last_error")
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  finishedAt         DateTime?  @map("finished_at") @db.Timestamptz(6)
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Restrict)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceToken  DeviceToken? @relation(fields: [deviceTokenId], references: [id], onDelete: SetNull)
+
+  @@unique([notificationId, deviceTokenId])
+  @@map("push_delivery")
+}
+
+/// Two fixed rows (SEND, RECEIPT) shared by all instances: pause and single-prober election after Expo rejects our credentials.
+model PushProviderState {
+  channel             PushChannel       @id
+  status              PushChannelStatus @default(OK)
+  pausedUntil         DateTime?         @map("paused_until") @db.Timestamptz(6)
+  consecutiveFailures Int               @default(0) @map("consecutive_failures")
+  lastErrorCode       String?           @map("last_error_code")
+  lastErrorAt         DateTime?         @map("last_error_at") @db.Timestamptz(6)
+  probeClaimId        String?           @map("probe_claim_id") @db.Uuid
+  probeUntil          DateTime?         @map("probe_until") @db.Timestamptz(6)
+
+  @@map("push_provider_state")
+}
+
+/// One row: the token bucket that keeps the COMBINED send rate of all instances under Expo's per-project limit.
+model PushRateBucket {
+  id           Int       @id @default(1)
+  tokens       Float
+  refilledAt   DateTime  @default(now()) @map("refilled_at") @db.Timestamptz(6)
+  blockedUntil DateTime? @map("blocked_until") @db.Timestamptz(6)
+
+  @@map("push_rate_bucket")
 }
 
 // ─────────────────────── Chat (later phase) ───────────────────────

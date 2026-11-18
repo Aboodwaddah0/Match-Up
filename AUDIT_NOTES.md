@@ -137,7 +137,8 @@ Still open from Phase 1's scope: none. Behaviour changes to note: `GET /chats` a
 |---|---|
 | AUD-01 admin audit log | committed (`49bc01f`) |
 | MAIL-01 / AUTH-02 e-mail outbox | implemented, **not committed**: `mail_outbox` table and migration `20261118000100_mail_outbox`; token and queued message created in the same transaction as register / resend / forgot-password; worker with `SKIP LOCKED` claiming, leases, retries with backoff, terminal failures and retention; token stored encrypted under the dedicated `MAIL_OUTBOX_ENCRYPTION_KEY` (required in production, never derived from the JWT secret) and wiped after use; nodemailer time limits; forgot-password answers and times the same for every account. Duplicate delivery remains possible (SMTP is at-least-once). D20 C1 (deep-link scheme, https fallback) is untouched |
-| NOTIF-01, BIZ-02, PRIV-01 | not started |
+| NOTIF-01 Expo push delivery | implemented, **not committed**: `push_delivery`, `push_provider_state`, `push_rate_bucket`, `notification.push_fanout_at` (migration `20261118000200_push_delivery`); idempotent fan-out, leased sending, receipts (a ticket is not a delivery, `UNCONFIRMED` when no receipt), separate SEND / RECEIPT authentication channels with a single-instance probe, a PostgreSQL token bucket shared by all instances, device handling, 24 h staleness, retention of finished deliveries only. In-app notification retention (OPS-06) is NOT part of it |
+| BIZ-02, PRIV-01 | not started |
 
 ## Implementation plan (Phase 1 above is done; Phases 2 and 3 are not started)
 

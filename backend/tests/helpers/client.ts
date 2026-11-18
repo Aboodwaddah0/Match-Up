@@ -33,6 +33,9 @@ export async function resetDb(): Promise<void> {
     prisma.$executeRawUnsafe('ALTER TABLE admin_audit_log DISABLE TRIGGER trg_admin_audit_no_truncate'),
     prisma.$executeRawUnsafe('TRUNCATE "user", city CASCADE'),
     prisma.$executeRawUnsafe('ALTER TABLE admin_audit_log ENABLE TRIGGER trg_admin_audit_no_truncate'),
+    // push coordination rows hold no foreign keys, so TRUNCATE does not reach them: put them back to their initial state
+    prisma.$executeRawUnsafe("UPDATE push_provider_state SET status = 'OK', paused_until = NULL, consecutive_failures = 0, last_error_code = NULL, last_error_at = NULL, probe_claim_id = NULL, probe_until = NULL"),
+    prisma.$executeRawUnsafe('UPDATE push_rate_bucket SET tokens = 300, refilled_at = now(), blocked_until = NULL'),
   ]);
 }
 

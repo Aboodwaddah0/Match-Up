@@ -32,6 +32,7 @@ Apply: `npx prisma migrate deploy` (needs `DATABASE_URL`). Verified: migrations 
 | Reviews: completed match, both attended, 7-day window, once per pair | `fym_review_guard` + unique |
 | Booking shape (IN_APP vs EXTERNAL) | `chk_booking_source_shape` |
 | Outbox row holds its secret exactly while sendable; claim / finished / sent shape (MAIL-01, migration `20261118000100_mail_outbox`) | `chk_mail_outbox_secret_lifecycle`, `chk_mail_outbox_claim`, `chk_mail_outbox_finished`, `chk_mail_outbox_sent`, partial indexes `idx_mail_outbox_*` |
+| One push per (notification, device); an accepted push cannot silently return to PENDING; the device token snapshot lives exactly while the delivery does; one shared send channel state and rate bucket (NOTIF-01, migration `20261118000200_push_delivery`) | `push_delivery_notification_id_device_token_id_key`, `chk_push_ticket_phase`, `chk_push_token`, `chk_push_claim` (send lease exactly while SENDING), `chk_push_receipt_lease` (receipt lease only on an ACCEPTED row), `chk_push_finished`, `chk_push_state_paused`, `chk_push_state_probe`, `chk_push_bucket_single`, partial indexes `idx_push_delivery_*` |
 | Admin audit log is append-only (AUD-01, migration `20261117000400_admin_audit_log`) | `trg_admin_audit_immutable` refuses UPDATE / DELETE and `trg_admin_audit_no_truncate` refuses TRUNCATE (both `fym_audit_immutable`; a superuser can still disable them, see the migration header); `chk_admin_audit_reason_length`, `chk_admin_audit_metadata_object` |
 
 ## Error codes the service must map

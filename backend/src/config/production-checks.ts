@@ -12,6 +12,9 @@ export interface ProductionSettings {
   APP_URL: string;
   SMTP_URL?: string | undefined;
   MAIL_OUTBOX_ENCRYPTION_KEY?: string | undefined;
+  EXPO_ENHANCED_SECURITY?: boolean | undefined;
+  EXPO_ACCESS_TOKEN?: string | undefined;
+  EXPO_API_BASE_URL?: string | undefined;
   VERIFY_EMAIL_URL?: string | undefined;
   RESET_PASSWORD_URL?: string | undefined;
 }
@@ -44,6 +47,12 @@ export function productionProblems(s: ProductionSettings): string[] {
     const decoded = Buffer.from(mailKey, 'base64').toString('latin1').toLowerCase();
     if (KNOWN_PLACEHOLDERS.some((x) => decoded.includes(x))) problems.push('MAIL_OUTBOX_ENCRYPTION_KEY is a development placeholder. Generate a real one.');
     if (mailKey === s.JWT_ACCESS_SECRET) problems.push('MAIL_OUTBOX_ENCRYPTION_KEY must be a different value from JWT_ACCESS_SECRET.');
+  }
+  if (s.EXPO_ENHANCED_SECURITY && !s.EXPO_ACCESS_TOKEN) {
+    problems.push('EXPO_ENHANCED_SECURITY is true but EXPO_ACCESS_TOKEN is not set: Expo would reject every push as UNAUTHORIZED.');
+  }
+  if (s.EXPO_API_BASE_URL && !/^https:\/\//i.test(s.EXPO_API_BASE_URL)) {
+    problems.push('EXPO_API_BASE_URL must be an https URL in production (the access token travels in the request).');
   }
   const linksConfigured = Boolean(s.VERIFY_EMAIL_URL && s.RESET_PASSWORD_URL);
   if (!linksConfigured && isLocal(s.APP_URL)) {

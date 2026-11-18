@@ -232,7 +232,62 @@ A team match has no join requests or capacity. `GET /matches/:id` shows `sides` 
 | `GET /notifications?unread=true&page&pageSize` | my notifications (`type`, `params` data to render in my language, `resource`, `read`) plus `unreadCount` |
 | `GET /notifications/unread-count` | badge number |
 | `POST /notifications/:id/read`, `POST /notifications/read-all` | mark read (idempotent) |
-| `POST /notifications/devices` `{token, platform}`, `DELETE /notifications/devices/:token` | register / remove a push token (delivery is not wired yet) |
+| `POST /notifications/devices` `{token, platform: ios|android}`, `DELETE /notifications/devices/:token` | register / remove an Expo push token (see Push notifications); web push tokens are refused |
+
+## Push notifications (Expo)
+
+Every notification stays in the in-app center. Some also become a push to the user's devices, delivered through the Expo Push Service by a background worker (`PUSH_WORKER_ENABLED`, default `true`, safe on several instances). Business code is unchanged: `notify()` still only writes the notification row.
+
+**Which types push (11).** `MATCH_REQUEST_RECEIVED`, `MATCH_REQUEST_ACCEPTED`, `MATCH_REQUEST_REJECTED`, `MATCH_CANCELLED`, `MATCH_TIME_CHANGED`, `MATCH_INVITATION`, `BOOKING_CONFIRMED`, `BOOKING_REJECTED`, `TEAM_INVITATION`, `CHALLENGE_RECEIVED`, `CHALLENGE_ACCEPTED`. The other 20 types (including `REVIEW_RECEIVED` and `REPORT_RESOLVED`) never push; chat is not a notification and has its own realtime channel. The policy is `PUSH_POLICY` in `src/modules/notifications/push-policy.ts`: the compiler and a test refuse a type that is not classified, and a value that is not in the table is not pushed. Recipients are exactly the recipients of the notification rows (challenges: the captain and vice captains of the challenged / challenging team; time changes: confirmed participants and pending requesters). One push per notification per registered device, no throttling or quiet hours. Texts are Arabic or English by the user's locale and never include free text typed by users (cancel reasons, booking notes).
+
+**Mobile contract (the app, not the backend, talks to Expo to get a token).**
+1. Ask the user's permission for notifications.
+2. Call `Notifications.getExpoPushTokenAsync({ projectId })`, where `projectId` is the Expo project id from the app config (`extra.eas.projectId`, as in Expo's setup guide). The backend has no setting for it and cannot check which project a token came from.
+3. `POST /notifications/devices` with `{ token, platform }` on every app start and login (the token can change, for example after a reinstall on Android), and `DELETE /notifications/devices/:token` on logout.
+The backend only checks that the token LOOKS like an Expo token (`ExponentPushToken[...]` / `ExpoPushToken[...]`) and the platform is `ios` or `android`. That filters junk; it does not replace the registration with Expo. `device_token` holds push tokens only; sessions are refresh tokens, so refusing web push tokens does not touch web login.
+
+**How a push is delivered.** A pass of the worker (every 5 s) does four things: (1) *fan-out*: one statement turns notifications that have not been fanned out into one `PENDING` `push_delivery` per device of an ACTIVE user, marks them done, and can be repeated or interrupted safely (`UNIQUE (notification, device)`); (2) *send*: claims deliveries under a 120 s lease and sends them in batches of up to 100; (3) *receipts*: asks Expo what happened; (4) housekeeping. A delivery goes `PENDING` → `SENDING` → `ACCEPTED` (Expo returned a **ticket**; this does not mean the user got it) → `DELIVERED` (the **receipt** says ok). Other end states: `FAILED` (permanent error or attempts used up), `CANCELLED` (device removed or reassigned, user suspended, notification older than 24 h), `UNCONFIRMED` (accepted, but no receipt ever appeared: neither delivered nor failed).
+
+| Situation | What happens |
+|---|---|
+| Transient error (timeout, network, HTTP 5xx, unusable answer) | the batch goes back to `PENDING` with backoff 10 s, 1 min, 5 min, 30 min, 1 h, 3 h, 6 h (±20 %), 8 attempts, then `FAILED` |
+| Ticket / receipt `DeviceNotRegistered` | `FAILED`, the device token is deleted (only if it is still that token), the device's other waiting pushes are cancelled |
+| `MessageTooBig`, unknown receipt error | `FAILED` with the code |
+| Receipt `MessageRateExceeded` | the ONE case that sends again: the provider refused it, so the ticket is cleared and the push is requeued |
+| `MismatchSenderId`, `InvalidCredentials`, `InvalidProviderToken` | `FAILED` (visible, error-logged); requeue after fixing the credentials (below) |
+| Receipt not available | asked again 15 min after the ticket (Expo's recommendation), then 45 min, 1 h 45, 3 h 45, 7 h 45, 15 h 45, 23 h; receipts are cleared by Expo after 24 h, so after that `UNCONFIRMED` |
+| Notification older than 24 h when it would go out | `CANCELLED` (`STALE`); the push `ttl` is also 24 h |
+
+**Authentication failures (Enhanced Push Security).** The API cannot tell whether Enhanced Push Security is on in your Expo account, so `EXPO_ENHANCED_SECURITY` says so; with `true`, production refuses to start without `EXPO_ACCESS_TOKEN`. The token is sent only as `Authorization: Bearer ...` and never logged. If Expo answers `UNAUTHORIZED` (or HTTP 401/403; Expo's documentation names the error code but not the HTTP status), the SEND and RECEIPT channels are handled separately and shared by all instances in `push_provider_state`:
+- **Sending:** the batch returns to `PENDING` WITHOUT consuming attempts, the channel pauses (5, 15, 30, then 60 minutes), one error is logged per pause, and notifications keep fanning out into pending deliveries. When the pause ends, ONE instance sends ONE pending delivery as a probe; success resumes everything, failure lengthens the pause. If the outage lasts longer than 24 hours, the oldest pushes are cancelled as stale (logged and counted); the in-app notifications are never affected.
+- **Receipts:** the deliveries stay `ACCEPTED`, only the next receipt check is postponed, nothing is consumed, and the probe is a read-only `getReceipts` request for one ticket. An accepted push is never sent again because receipts could not be read (a database constraint also forbids moving an `ACCEPTED` push back to `PENDING` without clearing its ticket).
+- Fix the credentials and nothing else: the next probe finds them working and the work resumes from where it stopped.
+
+**Send rate.** Expo allows 600 notifications per second per project. All instances share a token bucket in PostgreSQL (`push_rate_bucket`, database clock, no extra service): at most 300 messages per second combined, burst 300. If Expo answers "too many requests" the bucket is blocked for 15 s for every instance.
+
+**Duplicates are possible.** Expo has no idempotency key: if Expo accepts a push and the worker dies before the ticket is saved, the push is sent again. `collapseId` and `tag` (both the notification id) let the device merge such copies; this reduces duplicates but is not a guarantee.
+
+**Retention.** Finished deliveries are deleted after 14 days (`DELIVERED`, `CANCELLED`) or 30 days (`FAILED`, `UNCONFIRMED`). `PENDING` (also retrying), `SENDING` and `ACCEPTED` deliveries are never deleted. In-app notifications have no retention yet (audit finding OPS-06); when that is added it must delete finished deliveries first (the foreign key forbids deleting a notification that still has deliveries).
+
+**Operations.**
+```sql
+-- is a channel paused? (SEND / RECEIPT)
+SELECT channel, status, paused_until, consecutive_failures, last_error_code, last_error_at FROM push_provider_state;
+-- what is the queue doing?
+SELECT status, last_error, count(*), min(created_at) FROM push_delivery GROUP BY 1, 2 ORDER BY 1, 2;
+```
+```sql
+-- requeue-credential-failures: after fixing FCM / APNs credentials in Expo, requeue pushes that failed with a credential
+-- error, only while the notification is younger than 24 hours (older ones would be cancelled as stale anyway)
+UPDATE push_delivery p
+   SET status = 'PENDING', attempts = 0, next_attempt_at = now(), finished_at = NULL, last_error = NULL,
+       ticket_id = NULL, ticket_at = NULL, next_receipt_at = NULL, receipt_attempts = 0, expo_token = dt.token
+  FROM device_token dt, notification n
+ WHERE p.status = 'FAILED' AND p.last_error IN ('MismatchSenderId', 'InvalidCredentials', 'InvalidProviderToken')
+   AND dt.id = p.device_token_id AND n.id = p.notification_id AND n.created_at > now() - interval '24 hours';
+```
+
+**Deployment order.** Run the migration, then deploy the API: the old API ignores the new tables and the new column. The migration marks every existing notification as fanned out, so deploying never pushes old events. To roll back, roll the API back first; dropping the new tables discards pending pushes only (in-app notifications are unaffected).
 
 ## Reviews API (all need Bearer)
 

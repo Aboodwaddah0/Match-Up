@@ -33,6 +33,19 @@ const schema = z.object({
     .optional()
     .transform((v) => (v ? v : undefined))
     .refine((v) => v === undefined || isValidMailKey(v), 'must be 32 random bytes encoded as base64 (43 characters), e.g. from: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"'),
+  // Push notifications through Expo (NOTIF-01). The access token is needed only when "Enhanced Push Security" is switched on in the Expo
+  // account; the API cannot detect that, so EXPO_ENHANCED_SECURITY says so (production then refuses to start without the token).
+  // The Expo project id is NOT a backend setting: the mobile app passes it to getExpoPushTokenAsync (see README).
+  EXPO_ACCESS_TOKEN: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  EXPO_ENHANCED_SECURITY: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  EXPO_API_BASE_URL: z
+    .string()
+    .trim()
+    .url()
+    .default('https://exp.host')
+    .transform((v) => v.replace(/\/+$/, '')),
+  // Sends the pushes of notifications. Safe to run on several instances.
+  PUSH_WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   MAIL_FROM: z.string().trim().min(3).default('Find Your Match <no-reply@localhost>'),
   // Sends queued e-mails (verification, password reset). Safe to run on several instances. Turn it off only on instances that must not send.
   MAIL_WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),

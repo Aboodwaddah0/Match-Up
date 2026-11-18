@@ -317,6 +317,19 @@ async function teamSides(matchId: string, format: keyof typeof FORMAT_SIZE) {
   return sides.map((s) => ({ side: s.side, team: s.team, rosterCount: s._count.participants, required: FORMAT_SIZE[format] }));
 }
 
+/**
+ * Who must hear that a match moved: confirmed participants AND pending requesters (never the person who made the change).
+ * Today the confirmed set is always empty, because the database only allows a time change while nobody is confirmed (D12); the
+ * rule is stated here so the notification stays right if that ever changes (for example rescheduling of team matches).
+ */
+export async function timeChangeRecipients(tx: Prisma.TransactionClient, matchId: string, exceptUserId: string): Promise<string[]> {
+  const [confirmed, pending] = await Promise.all([
+    tx.matchParticipant.findMany({ where: { matchId, status: 'CONFIRMED' }, select: { userId: true } }),
+    tx.matchRequest.findMany({ where: { matchId, status: 'PENDING' }, select: { userId: true } }),
+  ]);
+  return [...new Set([...confirmed, ...pending].map((r) => r.userId))].filter((u) => u !== exceptUserId);
+}
+
 /** The start / end an edit results in, relative to the match as it is NOW (read under the lock). */
 function resolveEditedTimes(cur: MatchRow, input: z.infer<typeof updateMatchSchema>) {
   const startAt = input.startAt ? new Date(input.startAt) : cur.startAt;
@@ -384,8 +397,7 @@ export async function updateMatch(actor: Actor, id: string, input: z.infer<typeo
       await tx.matchRequiredPosition.createMany({ data: input.requiredPositions.map((p) => ({ matchId: id, ...p })) });
     }
     if (timeChanged) {
-      const pending = await tx.matchRequest.findMany({ where: { matchId: id, status: 'PENDING' }, select: { userId: true } });
-      await notify(tx, pending.map((r) => r.userId), 'MATCH_TIME_CHANGED', { matchId: id, title: cur.title, startAt: startAt.toISOString() }, { type: 'match', id });
+      await notify(tx, await timeChangeRecipients(tx, id, actor.userId), 'MATCH_TIME_CHANGED', { matchId: id, title: cur.title, startAt: startAt.toISOString() }, { type: 'match', id });
     }
   }));
   return getMatch(actor, id);
