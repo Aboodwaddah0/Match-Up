@@ -202,9 +202,19 @@ export async function leaveMatch(actor: Actor, matchId: string) {
   }));
 }
 
-/** The organizer removes a confirmed player before the start: status REMOVED, not a late cancellation, no penalty for the player. */
+/**
+ * The organizer removes a confirmed player of an OPEN match before the start: status REMOVED, not a late cancellation, no penalty for the player.
+ * D19: in a TEAM_CHALLENGE the rosters belong to the teams, not to the organizer: each team's captain and vice captain manage only their own
+ * side, through the team roster endpoint (`removeFromRoster`, which checks the caller is staff of THAT team and that the player is on that
+ * team's side). This endpoint is therefore refused for a team match, otherwise the organizer (the challenging team's captain at creation, who
+ * may not even be team staff any more) could remove players of either side. An admin's override stays possible and audited. The match type
+ * never changes after creation (DB trigger), so the check does not need the match lock.
+ */
 export async function removeParticipant(actor: Actor, matchId: string, userId: string, httpRequestId?: string): Promise<void> {
   const m = await loadManageableMatch(matchId, actor);
+  if (m.type === 'TEAM_CHALLENGE' && !isAdminOverride(actor, m.organizerId)) {
+    throw new AppError(409, 'USE_TEAM_ROSTER', 'Players of a team match are removed through the team roster, by the captain or vice captain of their own team');
+  }
   await withDeadlockRetry(() => prisma.$transaction(async (tx) => {
     await lockMatch(tx, matchId);
     const p = await tx.matchParticipant.findUnique({ where: { matchId_userId: { matchId, userId } } });
