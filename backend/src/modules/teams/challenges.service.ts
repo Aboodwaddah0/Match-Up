@@ -197,14 +197,26 @@ export async function rejectChallenge(actor: Actor, challengeId: string) {
   return { challenge: await challengeDto(challengeId) };
 }
 
+/**
+ * Cancels ONE pending challenge inside the caller's transaction: the atomic claim (`updateMany ... WHERE status = PENDING`, so a concurrent
+ * accept / reject / cancel yields exactly one winner) and the notification to the challenged team's staff, together. Returns false when
+ * someone else answered first (nothing is written then). Used by `cancelChallenge` and by account deletion (PRIV-01).
+ */
+export async function cancelPendingChallengeInTx(tx: Prisma.TransactionClient, actor: Actor, challengeId: string, challengedTeamId: string): Promise<boolean> {
+  const res = await tx.teamChallenge.updateMany({ where: { id: challengeId, status: 'PENDING' }, data: { status: 'CANCELLED', decidedById: actor.userId, decidedAt: new Date() } });
+  if (res.count === 0) return false;
+  await notify(tx, await staffIds(tx, challengedTeamId), 'CHALLENGE_CANCELLED', { challengeId }, { type: 'challenge', id: challengeId });
+  return true;
+}
+
 /** The challenger's staff withdraw a pending challenge (final). */
 export async function cancelChallenge(actor: Actor, challengeId: string) {
   const c = await loadPending(challengeId);
   await requireStaff(c.challengerTeamId, actor);
   await prisma.$transaction(async (tx) => {
-    const res = await tx.teamChallenge.updateMany({ where: { id: challengeId, status: 'PENDING' }, data: { status: 'CANCELLED', decidedById: actor.userId, decidedAt: new Date() } });
-    if (res.count === 0) throw new AppError(409, 'CHALLENGE_ALREADY_DECIDED', 'This challenge was already answered');
-    await notify(tx, await staffIds(tx, c.challengedTeamId), 'CHALLENGE_CANCELLED', { challengeId }, { type: 'challenge', id: challengeId });
+    if (!(await cancelPendingChallengeInTx(tx, actor, challengeId, c.challengedTeamId))) {
+      throw new AppError(409, 'CHALLENGE_ALREADY_DECIDED', 'This challenge was already answered');
+    }
   });
   return { challenge: await challengeDto(challengeId) };
 }
@@ -256,11 +268,11 @@ export async function getRoster(actor: Actor, teamId: string, matchId: string) {
   const rows = await prisma.matchParticipant.findMany({
     where: { matchTeamId: side.id, status: 'CONFIRMED' },
     orderBy: { joinedAt: 'asc' },
-    include: { user: { select: { id: true, fullName: true, avatarUrl: true } } },
+    include: { user: { select: { id: true, fullName: true, avatarUrl: true, status: true } } },
   });
   return {
     side: side.side,
     required: FORMAT_SIZE[side.match.format],
-    players: rows.map((p) => ({ userId: p.userId, fullName: p.user.fullName, avatarUrl: p.user.avatarUrl, joinedAt: p.joinedAt })),
+    players: rows.map((p) => ({ userId: p.userId, fullName: p.user.fullName, avatarUrl: p.user.avatarUrl, deleted: p.user.status === 'DELETED', joinedAt: p.joinedAt })),
   };
 }

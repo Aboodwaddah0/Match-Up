@@ -95,8 +95,16 @@ export async function updateVenue(actor: Actor, id: string, input: z.infer<typeo
   if (input.cityId) await assertCity(input.cityId);
   const audited = isVenueAdminOverride(actor, rights);
 
+  const statusChange = input.status !== undefined;
   await prisma.$transaction(async (tx) => {
-    if (audited) await lockVenue(tx, id);
+    // A status change (deactivation / reactivation) takes the venue row first, like the admin path, so it serializes with an account deletion
+    // that is checking this venue (PRIV-01). Under that lock the CALLER's own account is re-checked: a session that was already past
+    // authentication when its account was deleted must not reactivate a venue afterwards. Admins and staff of a venue whose owner was
+    // deleted are not refused: only the deleted caller is.
+    if (audited || statusChange) await lockVenue(tx, id);
+    if (statusChange && !audited && (await tx.user.count({ where: { id: actor.userId, status: 'DELETED' } })) > 0) {
+      throw new AppError(409, 'ACCOUNT_DELETED', 'This account has been deleted');
+    }
     const before = audited ? await tx.venue.findUniqueOrThrow({ where: { id } }) : null;
     if (input.status !== undefined) {
       // An owner may switch the venue ACTIVE <-> INACTIVE, but must never undo an administrator's suspension (moderation

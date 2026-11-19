@@ -77,6 +77,9 @@ export const resendLimiter = limiter({ windowMinutes: 60, limit: 5, key: userOf 
 /** change-password: 10 wrong-password attempts per 15 minutes per user (a stolen access token must not allow guessing). */
 export const changePasswordLimiter = limiter({ windowMinutes: 15, limit: 10, key: userOf, failuresOnly: true });
 
+/** account deletion: 10 failed attempts per 15 minutes per user (a successful deletion ends the account, so only failures count). */
+export const deleteAccountLimiter = limiter({ windowMinutes: 15, limit: 10, key: userOf, failuresOnly: true });
+
 // ── whole API (audit SEC-03) ──
 /**
  * Safety net for the entire API, keyed by the signed-in user when the bearer token is valid, otherwise by IP.

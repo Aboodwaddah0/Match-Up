@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
+import { toUserSummary } from '../../lib/user-summary';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
 import { loadViewableMatch } from '../matches/matches.service';
@@ -69,7 +70,7 @@ export async function pendingReviews(actor: Actor, matchId: string) {
   const [attendees, done, blocks] = await Promise.all([
     prisma.matchParticipant.findMany({
       where: { matchId, status: 'CONFIRMED', attendanceStatus: 'ATTENDED', userId: { not: actor.userId } },
-      include: { user: { select: { id: true, fullName: true, avatarUrl: true } } },
+      include: { user: { select: { id: true, fullName: true, avatarUrl: true, status: true } } },
     }),
     prisma.review.findMany({ where: { matchId, reviewerId: actor.userId }, select: { reviewedId: true } }),
     prisma.blockedUser.findMany({ where: { OR: [{ blockerId: actor.userId }, { blockedId: actor.userId }] } }),
@@ -79,7 +80,7 @@ export async function pendingReviews(actor: Actor, matchId: string) {
   return {
     open: true,
     closesAt: new Date(m.completedAt!.getTime() + windowMs),
-    players: attendees.filter((p) => !reviewed.has(p.userId) && !hidden.has(p.userId)).map((p) => p.user),
+    players: attendees.filter((p) => !reviewed.has(p.userId) && !hidden.has(p.userId)).map((p) => toUserSummary(p.user)),
   };
 }
 
@@ -95,7 +96,7 @@ export async function listPlayerReviews(actor: Actor, userId: string, q: z.infer
       orderBy: { createdAt: 'desc' },
       skip: (q.page - 1) * q.pageSize,
       take: q.pageSize,
-      include: { reviewer: { select: { id: true, fullName: true, avatarUrl: true } }, match: { select: { id: true, title: true, startAt: true } } },
+      include: { reviewer: { select: { id: true, fullName: true, avatarUrl: true, status: true } }, match: { select: { id: true, title: true, startAt: true } } },
     }),
     prisma.review.count({ where }),
     prisma.review.aggregate({ where, _avg: { sportsmanshipScore: true, skillScore: true, reliabilityScore: true } }),
@@ -110,7 +111,7 @@ export async function listPlayerReviews(actor: Actor, userId: string, q: z.infer
     },
     reviews: rows.map((r) => ({
       id: r.id,
-      reviewer: r.reviewer,
+      reviewer: toUserSummary(r.reviewer),
       match: r.match,
       sportsmanshipScore: r.sportsmanshipScore,
       skillScore: r.skillScore,

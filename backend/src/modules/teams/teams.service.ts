@@ -2,6 +2,7 @@ import type { Prisma, TeamRole } from '@prisma/client';
 import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
+import { toUserSummary } from '../../lib/user-summary';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
 import { notify } from '../notifications/notify';
@@ -17,7 +18,7 @@ export const MAX_TEAM_MEMBERS = 30;
 const INVITATION_TTL_DAYS = 7;
 const DAY = 86_400_000;
 
-const userSummary = { select: { id: true, fullName: true, avatarUrl: true } } as const;
+const userSummary = { select: { id: true, fullName: true, avatarUrl: true, status: true } } as const;
 
 /** The user's role in the team, or null when they are not a member. */
 export async function myRole(teamId: string, userId: string): Promise<TeamRole | null> {
@@ -72,7 +73,7 @@ function toDto(t: TeamRow, viewerId: string) {
     memberCount: t.members.length,
     captain: t.members.find((m) => m.role === 'CAPTAIN')?.user ?? null,
     myRole: mine?.role ?? null,
-    members: t.members.map((m) => ({ userId: m.userId, fullName: m.user.fullName, avatarUrl: m.user.avatarUrl, role: m.role, joinedAt: m.joinedAt })),
+    members: t.members.map((m) => ({ userId: m.userId, fullName: m.user.fullName, avatarUrl: m.user.avatarUrl, deleted: m.user.status === 'DELETED', role: m.role, joinedAt: m.joinedAt })),
     createdAt: t.createdAt,
   };
 }
@@ -188,8 +189,10 @@ export async function transferCaptaincy(actor: Actor, teamId: string, userId: st
     // Lock the captain row so two concurrent transfers serialize; the unique index allows one captain at a time.
     const me = await tx.$queryRaw<{ role: string }[]>`SELECT role::text FROM team_member WHERE team_id = ${teamId}::uuid AND user_id = ${actor.userId}::uuid FOR UPDATE`;
     if (me[0]?.role !== 'CAPTAIN') throw new AppError(403, 'FORBIDDEN', 'Only the captain can transfer the captaincy');
-    const target = await tx.teamMember.findUnique({ where: { teamId_userId: { teamId, userId } } });
+    const target = await tx.teamMember.findUnique({ where: { teamId_userId: { teamId, userId } }, include: { user: { select: { status: true } } } });
     if (!target) throw new AppError(404, 'NOT_A_TEAM_MEMBER', 'This player is not in the team');
+    // PRIV-01: never hand the team to an account that cannot act (suspended or deleted). A deletion racing this is refused by the DB guard on the role change.
+    if (target.user.status !== 'ACTIVE') throw new AppError(409, 'USER_UNAVAILABLE', 'This player cannot become captain');
     await tx.teamMember.update({ where: { teamId_userId: { teamId, userId: actor.userId } }, data: { role: 'VICE_CAPTAIN' } });
     await tx.teamMember.update({ where: { teamId_userId: { teamId, userId } }, data: { role: 'CAPTAIN' } });
     await notify(tx, [userId], 'TEAM_CAPTAIN_TRANSFERRED', { teamId }, { type: 'team', id: teamId });
@@ -231,7 +234,7 @@ export async function listTeamInvitations(actor: Actor, teamId: string) {
     orderBy: { createdAt: 'desc' },
     include: { invitee: userSummary },
   });
-  return { invitations: rows.map((i) => ({ id: i.id, status: i.status, expiresAt: i.expiresAt, createdAt: i.createdAt, invitee: i.invitee })) };
+  return { invitations: rows.map((i) => ({ id: i.id, status: i.status, expiresAt: i.expiresAt, createdAt: i.createdAt, invitee: toUserSummary(i.invitee) })) };
 }
 
 /** Pending, unexpired team invitations addressed to the caller. */
@@ -241,7 +244,7 @@ export async function myInvitations(actor: Actor) {
     orderBy: { createdAt: 'desc' },
     include: { team: { select: { id: true, name: true, logoUrl: true } }, invitedBy: userSummary },
   });
-  return { invitations: rows.map((i) => ({ id: i.id, team: i.team, invitedBy: i.invitedBy, expiresAt: i.expiresAt, createdAt: i.createdAt })) };
+  return { invitations: rows.map((i) => ({ id: i.id, team: i.team, invitedBy: toUserSummary(i.invitedBy), expiresAt: i.expiresAt, createdAt: i.createdAt })) };
 }
 
 /**

@@ -2,6 +2,7 @@ import { Prisma, type BookingStatus } from '@prisma/client';
 import type { z } from 'zod';
 import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
+import { toUserSummary } from '../../lib/user-summary';
 import { prisma } from '../../lib/prisma';
 import { notify, type NotificationType } from '../notifications/notify';
 import { assertBookableWindow } from '../venues/fields.service';
@@ -20,7 +21,7 @@ import type { createBookingSchema, externalBookingSchema, myBookingsSchema, venu
 
 const include = {
   field: { include: { venue: { select: { id: true, name: true, address: true, latitude: true, longitude: true, contactPhone: true, timezone: true } } } },
-  createdBy: { select: { id: true, fullName: true, avatarUrl: true } },
+  createdBy: { select: { id: true, fullName: true, avatarUrl: true, status: true } },
 } satisfies Prisma.BookingInclude;
 type BookingRow = Prisma.BookingGetPayload<{ include: typeof include }>;
 
@@ -39,7 +40,7 @@ function dto(b: BookingRow) {
     decidedAt: b.decidedAt,
     cancelReason: b.cancelReason,
     createdAt: b.createdAt,
-    requester: b.createdBy,
+    requester: toUserSummary(b.createdBy),
     venue: b.field ? { id: b.field.venue.id, name: b.field.venue.name, address: b.field.venue.address, contactPhone: b.field.venue.contactPhone } : null,
     field: b.field ? { id: b.field.id, name: b.field.name, format: b.field.format } : null,
     external:
@@ -74,7 +75,7 @@ async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingId: stri
 }
 
 /**
- * Used when a match is cancelled with `releaseBooking: true`: cancels the organizer's own IN_APP booking so the venue
+ * Used when a match is cancelled with `releaseBooking: true` (and, with another `reason`, by account deletion for the user's own future in-app bookings): cancels the organizer's own IN_APP booking so the venue
  * slot is freed, and tells the venue managers. Runs inside the match-cancel transaction, so the match and its booking
  * change together or not at all. EXTERNAL bookings are never cancelled here (nothing to free), and a booking that is
  * not the caller's (or already finished) is silently left alone. Returns true only when a booking was actually cancelled (the
@@ -86,17 +87,17 @@ async function notifyLinkedMatches(tx: Prisma.TransactionClient, bookingId: stri
  * (requester / venue / admin cancel, confirm, reject) afterwards only inserts rows and READS matches (notifyLinkedMatches), and the sweepers
  * use SKIP LOCKED, so nothing holding a booking ever waits for a match: there is no cycle.
  */
-export async function releaseBookingForMatch(tx: Prisma.TransactionClient, actor: Actor, bookingId: string): Promise<boolean> {
+export async function releaseBookingForMatch(tx: Prisma.TransactionClient, actor: Actor, bookingId: string, reason = 'match cancelled'): Promise<boolean> {
   // Facts that never change (source, owner, venue, times of an in-app booking) are read first; the STATUS is decided only after the lock.
   const b = await tx.booking.findUnique({ where: { id: bookingId }, include: { field: { select: { venueId: true } } } });
   if (!b || b.source !== 'IN_APP') return false;
   if (b.createdById !== actor.userId && actor.role !== 'ADMIN') return false;
   const locked = await lockedStatus(tx, bookingId);
   if (locked !== 'PENDING' && locked !== 'CONFIRMED') return false;
-  await tx.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: 'match cancelled' } });
-  await event(tx, bookingId, actor.userId, locked, 'CANCELLED', 'match cancelled');
+  await tx.booking.update({ where: { id: bookingId }, data: { status: 'CANCELLED', cancelledById: actor.userId, cancelReason: reason } });
+  await event(tx, bookingId, actor.userId, locked, 'CANCELLED', reason);
   const managers = (await bookingManagerIds(b.field!.venueId, tx)).filter((u) => u !== actor.userId);
-  await notify(tx, managers, 'BOOKING_CANCELLED', { bookingId, byVenue: false, reason: 'match cancelled', startAt: b.startAt.toISOString() }, { type: 'booking', id: bookingId });
+  await notify(tx, managers, 'BOOKING_CANCELLED', { bookingId, byVenue: false, reason, startAt: b.startAt.toISOString() }, { type: 'booking', id: bookingId });
   return true;
 }
 

@@ -5,6 +5,7 @@ import { withDeadlockRetry } from '../../lib/db-errors';
 import { AppError } from '../../lib/errors';
 import { recordAdminAudit } from '../../lib/audit';
 import { lockMatch } from '../../lib/locks';
+import { toUserSummary } from '../../lib/user-summary';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
 import { releaseBookingForMatch } from '../bookings/bookings.service';
@@ -15,7 +16,7 @@ const FORMAT_SIZE = { F5: 5, F7: 7, F11: 11 } as const;
 const MINUTE = 60_000;
 
 export const matchInclude = {
-  organizer: { select: { id: true, fullName: true, avatarUrl: true } },
+  organizer: { select: { id: true, fullName: true, avatarUrl: true, status: true } },
   city: { select: { id: true, nameAr: true, nameEn: true } },
   requiredPositions: true,
   booking: { select: { id: true, status: true, source: true } },
@@ -83,7 +84,7 @@ export async function toDtos(rows: MatchRow[], actor: Actor, distances?: Map<str
       capacity: m.capacity,
       confirmedCount,
       availableSpots: isOpenMatch ? m.capacity! - confirmedCount! : null,
-      organizer: m.organizer,
+      organizer: toUserSummary(m.organizer),
       // The venue link. venueConfirmed=false means the booking was rejected/cancelled/expired ("venue not confirmed").
       booking: m.booking,
       venueConfirmed: m.booking ? ['CONFIRMED', 'COMPLETED'].includes(m.booking.status) : null,

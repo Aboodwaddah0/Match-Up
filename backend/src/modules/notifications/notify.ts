@@ -47,7 +47,12 @@ export async function notify(
   params: Record<string, unknown>,
   resource?: { type: string; id: string },
 ): Promise<void> {
-  const unique = [...new Set(userIds)];
+  const candidates = [...new Set(userIds)];
+  if (candidates.length === 0) return;
+  // PRIV-01: a DELETED account (anonymized in place) receives nothing: no row, therefore no push either. Suspended accounts still get
+  // their rows, exactly as before. One extra read per call, on the same connection / transaction as the write.
+  const gone = new Set((await db.user.findMany({ where: { id: { in: candidates }, status: 'DELETED' }, select: { id: true } })).map((u) => u.id));
+  const unique = candidates.filter((id) => !gone.has(id));
   if (unique.length === 0) return;
   await db.notification.createMany({
     data: unique.map((userId) => ({

@@ -25,6 +25,8 @@ const FYM: Record<string, [status: number, code: string, message: string]> = {
   FYM_ATTENDANCE_TOO_EARLY: [409, 'ATTENDANCE_TOO_EARLY', 'Attendance can be recorded once the match has started'],
   FYM_ATTENDANCE_NOT_CONFIRMED_PARTICIPANT: [409, 'NOT_A_PARTICIPANT', 'Only confirmed players have attendance'],
   FYM_REQUEST_FINAL: [409, 'REQUEST_ALREADY_DECIDED', 'This request was already decided'],
+  FYM_USER_DELETED: [409, 'ACCOUNT_DELETED', 'This account has been deleted'],
+  FYM_VENUE_NOT_ACTIVE: [409, 'VENUE_NOT_ACTIVE', 'This venue is not accepting bookings'],
   FYM_REQUESTS_NOT_ALLOWED: [400, 'REQUESTS_NOT_ALLOWED', 'This match does not take join requests'],
   FYM_PARTICIPANT_BAD_TRANSITION: [409, 'INVALID_STATE', 'This action is not allowed for this participant'],
   FYM_SLOT_BLOCKED: [409, 'SLOT_UNAVAILABLE', 'This time slot is not available'],

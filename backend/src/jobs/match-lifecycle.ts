@@ -205,12 +205,46 @@ export async function expireStaleTeamOffers(opts: SweepOptions = {}): Promise<nu
   return challenges + invites;
 }
 
+/**
+ * PRIV-01: notifications that were inserted for a DELETED account AFTER its deletion transaction had erased the existing ones (a notifier that
+ * read the recipient as ACTIVE just before the commit). One user per transaction, at most `batchSize` notifications each, their push deliveries
+ * first (push_delivery.notification_id is RESTRICT). Rows are taken FOR UPDATE SKIP LOCKED, so a push fan-out working on them is never waited
+ * for, and no user row is locked: the notification creation path is untouched. Idempotent (nothing left = nothing done); a larger backlog
+ * continues on the next run. It removes nothing but these notification rows and their deliveries. Returns the number of notifications removed.
+ */
+export async function purgeDeletedUserNotifications(opts: SweepOptions = {}): Promise<number> {
+  const limit = opts.batchSize ?? BATCH_SIZE;
+  let purged = 0;
+  await drain(
+    'purgeDeletedUserNotifications',
+    opts,
+    async (max, skip) =>
+      (
+        await prisma.$queryRaw<{ id: string }[]>`
+          SELECT u.id FROM "user" u
+           WHERE u.status = 'DELETED' AND EXISTS (SELECT 1 FROM notification n WHERE n.user_id = u.id) AND u.id <> ALL(${skipList(skip)}::uuid[])
+           ORDER BY u.id LIMIT ${max}`
+      ).map((r) => r.id),
+    async (tx, userId) => {
+      const rows = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM notification WHERE user_id = ${userId}::uuid ORDER BY id LIMIT ${limit} FOR UPDATE SKIP LOCKED`;
+      if (rows.length === 0) return false;
+      const ids = rows.map((r) => r.id);
+      await tx.pushDelivery.deleteMany({ where: { notificationId: { in: ids } } });
+      purged += (await tx.notification.deleteMany({ where: { id: { in: ids } } })).count;
+      return true;
+    },
+  );
+  return purged;
+}
+
 export interface LifecycleResult {
   started: number;
   closed: number;
   expired: number;
   completed: number;
   offers: number;
+  /** Notifications of deleted accounts removed (PRIV-01). */
+  purged: number;
   /** Names of jobs that threw (the others still ran). */
   failedJobs: string[];
   /** Rows that failed and were skipped (quarantined) during this run. */
@@ -242,6 +276,7 @@ export async function runLifecycleJobs(): Promise<LifecycleResult> {
     expired: () => expireStaleBookings(),
     completed: () => completeFinishedBookings(),
     offers: () => expireStaleTeamOffers(),
+    purged: () => purgeDeletedUserNotifications(),
   });
   return { ...counts, failedJobs: failed, failedRows: rowFailures };
 }
@@ -257,7 +292,7 @@ export function scheduleLifecycleJobs(intervalMs = 60_000): () => Promise<void> 
     running = (async () => {
       try {
         const r = await runLifecycleJobs();
-        if (r.started || r.closed || r.expired || r.completed || r.offers || r.failedJobs.length > 0 || r.failedRows > 0) logger.info(r, 'match lifecycle job');
+        if (r.started || r.closed || r.expired || r.completed || r.offers || r.purged || r.failedJobs.length > 0 || r.failedRows > 0) logger.info(r, 'match lifecycle job');
       } catch (err) {
         logger.error({ err }, 'match lifecycle job failed');
       }

@@ -1189,21 +1189,30 @@ Decided by the product owner after the production-readiness audit (finding PRIV-
 
 **Out of scope for the MVP:** **data export** (a user downloading their data). It is a future feature.
 
-*Implications recorded for implementation (not yet built):*
+*Implications recorded for implementation (all built since; the final rules are in the decisions below):*
 - A user row cannot be hard-deleted (21 foreign keys restrict it), so the account is **anonymized in place**: status DELETED, a unique unusable e-mail placeholder, name "Deleted user", avatar removed, credentials and sessions revoked. Rows that hold personal data and are not part of shared history (player profile, device tokens, e-mail tokens, notifications, blocks) are erased. Messages and reviews stay.
 - The sentence "preserve their content" means free text they wrote can still contain personal details; this is accepted by the decision above.
 - API user summaries should expose a `deleted` flag so clients can localize "Deleted user" (Arabic / English).
 - The deletion blocker check needs, at minimum: upcoming matches organized, teams captained with other members, venues owned, and team memberships.
 - "Transfer organizer responsibility" and "transfer venue ownership" do not exist in the system yet. See the open points: organizer transfer is NOT supported (D19, decision B2); venue ownership transfer is required by blocker 3 unless the deactivation path is used.
 
-*Open points (not decided; no rule has been assumed):*
-(a) What counts as "upcoming" for blocker 1 (proposal, not adopted: OPEN, FULL, SCHEDULED, IN_PROGRESS, and CLOSED_UNCONFIRMED while the organizer can still recover it).
-(b) The user's own upcoming participations, pending join requests and their own future bookings: blocker, automatic clean-up, or left as they are?
-(c) A team whose only member is the deleting captain (blocker 2 applies only when there are other members; the team's fate is not specified).
-(d) Staff roles the user holds at other people's venues, and pending invitations: not covered.
-(e) Venue ownership transfer: who may receive it, whether the recipient must accept, and who may manage or reactivate a venue that ends up deactivated and owned by a deleted user.
-(f) Other free text the user wrote besides messages and reviews (match notes and descriptions, booking notes, reports): kept or erased?
-(g) Re-registration with the same e-mail after deletion (technical default would be: allowed, because the placeholder frees the address).
+**Decisions on the open points (product owner, PRIV-01 implementation; final):**
+- **A1. Upcoming matches.** The user organizes a blocking match when it is OPEN, FULL, SCHEDULED, IN_PROGRESS, or CLOSED_UNCONFIRMED within its 7-day organizer recovery window; COMPLETED and CANCELLED never block. Organizer transfer is not supported (D19 / B2): the organizer cancels or completes their matches according to the existing lifecycle (an organizer can cancel a match that has not started and can only COMPLETE one that has started; a match past its start time but still OPEN / FULL / SCHEDULED is started lazily, so it is reported as a match to complete). Matches are never cancelled automatically.
+- **A2. Own participations, requests and bookings.** Pending join requests are withdrawn automatically. The user's own future IN-APP bookings (PENDING with a live hold, or CONFIRMED, not yet started) are cancelled automatically through the existing booking release (row lock and locked status, one event, venue managers notified). Participations in other people's matches are kept; no match of anyone else is cancelled; nobody is removed from a team.
+- **External bookings (corrected wording).** An EXTERNAL booking is a self-reported snapshot recorded by a player or organizer, with no registered venue (D11): it reserves no venue inventory, so it is never cancelled by a deletion and is not a blocker. What a venue owner uses to record a reservation made outside the app on their own venue is a **VenueBlock** (D11): **future VenueBlock entries (`end_at` in the future) on fields of venues owned by the deleting user block deletion**, are reported separately, and are never deleted automatically (the owner deletes them with the existing block-delete endpoint). Their history is preserved.
+- **A3. Sole-member teams.** A user who is the only member and captain of a team may delete the account; the team, its history and the membership row are kept (shown as "Deleted user"). A captain with other members is blocked until the captaincy is transferred; a MEMBER or VICE_CAPTAIN is blocked until they leave themselves. Nobody is removed from a team automatically.
+- **A4. Staff roles and invitations.** The user's staff roles at other people's venues are removed, and pending MatchInvitation and TeamInvitation records addressed to them are expired. There is no venue invitation entity.
+- **A5. Venues.** No ownership transfer. Every owned venue must be deactivated first (an ACTIVE venue blocks; INACTIVE and SUSPENDED count as deactivated and nothing is deactivated automatically). Future PENDING bookings (live hold, not started) and future CONFIRMED bookings (not started) of owned venues block deletion whatever the venue's status, reported separately from future blocks; expired holds and bookings that have started or ended do not block. An admin keeps full management of such venues after the owner is anonymized and can reactivate both INACTIVE and SUSPENDED venues; deleted owners are not notified.
+- **A6. Free text.** Match descriptions and notes, booking notes, report details, chat messages and reviews are kept unchanged (they may contain personal details; accepted for the MVP).
+- **A7. Re-registration.** The original e-mail becomes available immediately: the account gets the unusable placeholder `deleted-<user-uuid>@deleted.invalid` (derived from the immutable user id) and a valid Argon2 hash of a random secret that is never stored.
+- **Challenges.** A user's outgoing PENDING team challenges (the ones they created) are cancelled automatically and the challenged team's staff are notified; accepted challenges and existing matches are untouched.
+- **Audit.** One immutable `ACCOUNT_DELETED` record per successful deletion in the existing audit log (actor = the user, target = the user, counts only, no personal values).
+- **Admins.** An administrator account cannot delete itself (403 `ADMIN_CANNOT_DELETE`).
+- **Guard triggers and locks.** Database triggers refuse to create new dependencies (a match, booking, venue, venue staff role, join request, team membership, challenge or **venue block**) for a DELETED account and serialize that with the deletion; the deletion locks the venues the user owns, so a booking, a block or a reactivation cannot appear after the blocker check; a booking cannot be created on a venue that is not ACTIVE. Only a DELETED *creator* is refused.
+- **Staff and admins after the owner is deleted.** Staff with permission and admins keep managing the venue of a deleted owner, including creating blocks and (admins) reactivating it. Nothing is refused merely because the owner is DELETED.
+- **No transfers.** Organizer transfer (D19) and venue ownership transfer are NOT supported. Deleting an account never removes a team membership: an ordinary member leaves the team themselves first, and a sole captain's team and membership row are kept.
+- **Mail and notifications.** A deleted account is never e-mailed: queued messages for it are finished as failed (`ACCOUNT_DELETED`) and a message claimed just before the deletion is re-checked immediately before sending. A message that was already being handed to the mail server when the deletion committed can still go out once, to the user's own former address, with a dead link (the one-time token is erased; a database lock cannot be held across a network call). E-mail verification, like password reset, never acts on an account that is not active. Notifications inserted for a deleted account after the deletion are removed by a bounded, idempotent lifecycle job.
+- **API.** `GET /api/v1/users/me/deletion-blockers` (read-only preview) and `POST /api/v1/users/me/delete` with the password (204; 409 `ACCOUNT_DELETION_BLOCKED` with `details.blockers[]` of `{ code, count, resourceIds (max 50), resolution }`). Direct chats with a deleted peer become read-only; user summaries carry `deleted: true`; a deleted account never receives notifications, push or e-mail.
 
 ## D19. Team Challenge Control (2026-11-17)
 Decided by the product owner after the production-readiness audit (finding BIZ-02). Final wording. Refines D7 and D14; **D1–D17 are preserved**.
@@ -1241,7 +1250,9 @@ Decided by the product owner after the production-readiness audit.
 - **Error tracking:** **Sentry**.
 - **Data export:** out of MVP scope (see D18).
 
-*Implications recorded for implementation (not yet built):*
+**Implementation status of D20 (partial):** configurable e-mail deep-link targets (`VERIFY_EMAIL_URL`, `RESET_PASSWORD_URL`) and Expo Push Notifications (NOTIF-01) are implemented. **Sentry error tracking is NOT implemented** (it is a Phase 3 item that needs a new dependency), and the open points (a), (b) and (c) below are still open; D20 must not be treated as complete.
+
+*Implications recorded for implementation (partly built; Sentry and the open points below are not):*
 - Deep links need the mobile app's URL scheme to be defined in the Expo app configuration. Development builds in Expo Go use a different URL form than release builds.
 - Notifications are stored as data (type + params), not text. Push messages need their text produced in the user's language (Arabic / English) when sent.
 - Device registration currently accepts any token string; with Expo, tokens have a known form and can be validated and cleaned up when Expo reports them invalid.

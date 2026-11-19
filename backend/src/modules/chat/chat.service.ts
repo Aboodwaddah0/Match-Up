@@ -3,6 +3,7 @@ import type { z } from 'zod';
 import { areBlocked } from '../../lib/blocks';
 import { AppError } from '../../lib/errors';
 import { emitToUsers } from '../../lib/realtime';
+import { toUserSummary } from '../../lib/user-summary';
 import { prisma } from '../../lib/prisma';
 import type { Actor } from '../../types/actor';
 import type { listChatsSchema, listMessagesSchema } from './chat.schemas';
@@ -20,7 +21,7 @@ import type { listChatsSchema, listMessagesSchema } from './chat.schemas';
 const RATE_LIMIT_PER_MINUTE = 20;
 const READ_ONLY_AFTER_MATCH_DAYS = 7;
 const DAY = 86_400_000;
-const userSummary = { select: { id: true, fullName: true, avatarUrl: true } } as const;
+const userSummary = { select: { id: true, fullName: true, avatarUrl: true, status: true } } as const;
 
 /** userIds that currently belong to the conversation. */
 async function memberIds(c: Conversation): Promise<string[]> {
@@ -55,6 +56,8 @@ async function loadAccess(conversationId: string, userId: string): Promise<Acces
   if (conversation.type === 'DIRECT') {
     const other = members.find((m) => m !== userId);
     if (other && (await areBlocked(userId, other))) throw notFound;
+    // PRIV-01: history stays readable, but nobody can write to a deleted account (their messages are kept, shown as "Deleted user").
+    if (other) canWrite = (await prisma.user.count({ where: { id: other, status: 'DELETED' } })) === 0;
   } else if (conversation.type === 'MATCH') {
     const m = await prisma.match.findUniqueOrThrow({ where: { id: conversation.matchId! }, select: { status: true, endAt: true } });
     canWrite = m.status !== 'CANCELLED' && Date.now() < m.endAt.getTime() + READ_ONLY_AFTER_MATCH_DAYS * DAY;
@@ -178,7 +181,7 @@ export async function listMessages(actor: Actor, conversationId: string, q: z.in
   const page = rows.slice(0, q.limit);
   return {
     canWrite,
-    messages: page.map((m) => ({ id: m.id, sender: m.sender, body: m.body, createdAt: m.createdAt })), // newest first
+    messages: page.map((m) => ({ id: m.id, sender: toUserSummary(m.sender), body: m.body, createdAt: m.createdAt })), // newest first
     nextBefore: rows.length > q.limit ? page[page.length - 1]!.id : null,
   };
 }
@@ -282,8 +285,8 @@ export async function listChats(actor: Actor, q: z.infer<typeof listChatsSchema>
       title: c.type === 'MATCH' ? c.match?.title : c.type === 'TEAM' ? c.team?.name : other?.fullName,
       match: c.match,
       team: c.team,
-      with: other ?? null,
-      lastMessage: { id: last.id, sender: last.sender, body: last.body, createdAt: last.createdAt },
+      with: other ? toUserSummary(other) : null,
+      lastMessage: { id: last.id, sender: toUserSummary(last.sender), body: last.body, createdAt: last.createdAt },
       unreadCount: r.unread,
     };
   });

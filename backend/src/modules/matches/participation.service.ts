@@ -16,7 +16,7 @@ import { getMatch, hasScheduleConflict, isAdminOverride, isSuspended, loadManage
  * (see prisma/README.md), so races end in a clean 409 instead of corrupt data.
  */
 
-const userSummary = { select: { id: true, fullName: true, avatarUrl: true } } as const;
+const userSummary = { select: { id: true, fullName: true, avatarUrl: true, status: true } } as const;
 
 // ───────────────────────── join requests ─────────────────────────
 
@@ -88,6 +88,7 @@ export async function listPendingRequests(actor: Actor, matchId: string, q: z.in
       player: {
         userId: r.user.id,
         fullName: r.user.fullName,
+        deleted: r.user.status === 'DELETED',
         avatarUrl: r.user.avatarUrl,
         skillLevel: r.user.playerProfile?.skillLevel ?? null,
         primaryPosition: r.user.playerProfile?.primaryPosition ?? null,
@@ -177,6 +178,7 @@ export async function listParticipants(actor: Actor, matchId: string) {
       userId: p.userId,
       ...(p.matchTeam ? { teamId: p.matchTeam.teamId, side: p.matchTeam.side } : {}),
       fullName: p.user.fullName,
+      deleted: p.user.status === 'DELETED',
       avatarUrl: p.user.avatarUrl,
       primaryPosition: p.user.playerProfile?.primaryPosition ?? null,
       skillLevel: p.user.playerProfile?.skillLevel ?? null,

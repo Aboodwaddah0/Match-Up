@@ -17,3 +17,6 @@ export const updateUserSchema = z
   })
   .partial()
   .refine((v) => Object.keys(v).length > 0, 'Send at least one field');
+
+/** POST /users/me/delete: the password is asked again (re-authentication) before the account is anonymized. */
+export const deleteAccountSchema = z.object({ password: z.string().min(1).max(200) });

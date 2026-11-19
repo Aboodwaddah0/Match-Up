@@ -328,6 +328,7 @@ enum AdminAuditAction {
   BOOKING_CONFIRMED_BY_ADMIN
   BOOKING_REJECTED_BY_ADMIN
   BOOKING_CANCELLED_BY_ADMIN
+  ACCOUNT_DELETED
 
   @@map("admin_audit_action")
 }

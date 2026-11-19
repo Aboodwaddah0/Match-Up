@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import { recordAdminAudit } from '../../lib/audit';
+import { lockVenue } from '../../lib/locks';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { disconnectUser } from '../../lib/realtime';
@@ -93,21 +94,23 @@ export async function listVenues(q: z.infer<typeof listVenuesSchema>) {
 }
 
 /**
- * Moves a venue between ACTIVE and SUSPENDED, records it in the audit log and tells its owner (all in one transaction).
- * A suspended venue is hidden from search and takes no new bookings; existing bookings are NOT touched.
- * The status change is a conditional update (`status = from`), so the transition is atomic and a repeat gets a 409.
+ * Moves a venue to SUSPENDED (from ACTIVE) or back to ACTIVE (from SUSPENDED or from INACTIVE, PRIV-01: an owner who deleted their account
+ * leaves a deactivated venue that an admin must be able to bring back), records it in the audit log and tells its owner (all in one
+ * transaction; a deleted owner is simply not notified, see notify). A suspended venue is hidden from search and takes no new bookings;
+ * existing bookings are NOT touched. The venue row is locked first and the transition is decided on the status found under that lock, so
+ * two simultaneous requests leave one record and the repeat gets a 409.
  */
 export async function setVenueStatus(adminId: string, id: string, to: 'ACTIVE' | 'SUSPENDED', reason: string | null | undefined, requestId?: string): Promise<void> {
-  const from = to === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED';
+  const allowedFrom = to === 'SUSPENDED' ? ['ACTIVE'] : ['SUSPENDED', 'INACTIVE'];
   await prisma.$transaction(async (tx) => {
-    const r = await tx.venue.updateMany({ where: { id, status: from }, data: { status: to } });
-    if (r.count === 0) {
-      if (!(await tx.venue.findUnique({ where: { id }, select: { id: true } }))) throw new AppError(404, 'VENUE_NOT_FOUND', 'Venue not found');
-      throw new AppError(409, 'INVALID_STATE', `Only an ${from.toLowerCase()} venue can be set to ${to.toLowerCase()}`);
+    await lockVenue(tx, id); // 404 VENUE_NOT_FOUND when it does not exist
+    const cur = await tx.venue.findUniqueOrThrow({ where: { id }, select: { status: true, ownerId: true, name: true } });
+    if (!allowedFrom.includes(cur.status)) {
+      throw new AppError(409, 'INVALID_STATE', to === 'SUSPENDED' ? 'Only an active venue can be suspended' : 'Only a suspended or inactive venue can be reactivated');
     }
-    await recordAdminAudit(tx, { actorId: adminId, action: to === 'SUSPENDED' ? 'VENUE_SUSPENDED' : 'VENUE_REACTIVATED', targetType: 'VENUE', targetId: id, reason, metadata: { fromStatus: from, toStatus: to }, requestId });
-    const v = await tx.venue.findUniqueOrThrow({ where: { id }, select: { ownerId: true, name: true } });
-    await notify(tx, [v.ownerId], to === 'SUSPENDED' ? 'VENUE_SUSPENDED' : 'VENUE_REACTIVATED', { venueId: id, name: v.name, reason: reason ?? null }, { type: 'venue', id });
+    await tx.venue.update({ where: { id }, data: { status: to } });
+    await recordAdminAudit(tx, { actorId: adminId, action: to === 'SUSPENDED' ? 'VENUE_SUSPENDED' : 'VENUE_REACTIVATED', targetType: 'VENUE', targetId: id, reason, metadata: { fromStatus: cur.status, toStatus: to }, requestId });
+    await notify(tx, [cur.ownerId], to === 'SUSPENDED' ? 'VENUE_SUSPENDED' : 'VENUE_REACTIVATED', { venueId: id, name: cur.name, reason: reason ?? null }, { type: 'venue', id });
   });
 }
 

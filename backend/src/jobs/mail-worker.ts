@@ -22,6 +22,11 @@ import { renderMail } from '../modules/auth/auth.emails';
  *  - Transient errors are retried with backoff; refusals of the recipient (SMTP 550-554, invalid envelope) and exhausted attempts
  *    end as FAILED. A message still queued after its token expired is CANCELLED (the link would not work).
  *  - Nothing here logs an address, a token or a message body: logs carry the outbox id, the kind, the attempt and an error code.
+ *  - PRIV-01: nothing is sent to a DELETED (anonymized) account. Such rows are never claimed and are finished as FAILED with ACCOUNT_DELETED;
+ *    a row claimed just before its account was deleted is re-checked immediately before the send, using the claim id, and skipped. What
+ *    remains is the unavoidable in-flight window: if the deletion commits AFTER that check, while the SMTP exchange is under way, the one
+ *    message still goes out (a database lock cannot be held across a network call without blocking deletions and risking deadlocks). It
+ *    goes to the user's own former address, and its link is dead because the deletion erases the one-time token it carries.
  */
 
 export const MAX_ATTEMPTS = 6;
@@ -69,6 +74,16 @@ interface Claimed {
   attempts: number;
 }
 
+/** PRIV-01: a queued message for a DELETED account is finished as FAILED (ACCOUNT_DELETED) instead of ever being sent. */
+async function failDeletedRecipients(): Promise<number> {
+  return prisma.$executeRaw`
+    UPDATE mail_outbox m
+       SET status = 'FAILED', token_enc = NULL, finished_at = now(), claim_id = NULL, locked_until = NULL, last_error = 'ACCOUNT_DELETED'
+      FROM "user" u
+     WHERE u.id = m.user_id AND u.status = 'DELETED'
+       AND (m.status = 'PENDING' OR (m.status = 'SENDING' AND m.locked_until <= now()))`;
+}
+
 /** Messages whose link has expired, whether queued or stuck in a dead worker's claim, are not worth sending. */
 async function cancelExpired(): Promise<number> {
   return prisma.$executeRaw`
@@ -89,17 +104,28 @@ async function failExhaustedLeases(maxAttempts: number): Promise<number> {
 async function claimOne(claimId: string): Promise<Claimed | null> {
   const rows = await prisma.$queryRaw<Claimed[]>`
     WITH due AS (
-      SELECT id FROM mail_outbox
-       WHERE (status = 'PENDING' AND next_attempt_at <= now()) OR (status = 'SENDING' AND locked_until <= now())
-       ORDER BY next_attempt_at
+      SELECT m.id FROM mail_outbox m JOIN "user" u ON u.id = m.user_id AND u.status <> 'DELETED'
+       WHERE (m.status = 'PENDING' AND m.next_attempt_at <= now()) OR (m.status = 'SENDING' AND m.locked_until <= now())
+       ORDER BY m.next_attempt_at
        LIMIT 1
-       FOR UPDATE SKIP LOCKED)
+       FOR UPDATE OF m SKIP LOCKED)
     UPDATE mail_outbox m
        SET status = 'SENDING', claim_id = ${claimId}::uuid, locked_until = now() + make_interval(secs => ${LEASE_SECONDS}::double precision), attempts = m.attempts + 1
       FROM due
      WHERE m.id = due.id
     RETURNING m.id, m.kind::text AS kind, m.to_email, m.locale::text AS locale, m.token_enc, m.attempts`;
   return rows[0] ?? null;
+}
+
+/**
+ * Read immediately before the send: is the row still OUR claim, and is its recipient not DELETED? A plain read: no lock is held while the
+ * message is handed to the mail server.
+ */
+async function stillDeliverable(id: string, claimId: string): Promise<boolean> {
+  const rows = await prisma.$queryRaw<{ ok: number }[]>`
+    SELECT 1 AS ok FROM mail_outbox m JOIN "user" u ON u.id = m.user_id
+     WHERE m.id = ${id}::uuid AND m.claim_id = ${claimId}::uuid AND m.status = 'SENDING' AND u.status <> 'DELETED'`;
+  return rows.length > 0;
 }
 
 // Every result is recorded only while the row is still OUR claim (claim_id + SENDING); 0 rows = someone else took it over.
@@ -135,6 +161,14 @@ async function processRow(row: Claimed, claimId: string, send: SendFn, maxAttemp
     return;
   }
 
+  if (!(await stillDeliverable(row.id, claimId))) {
+    // The account was deleted after the claim (its rows are erased, or still there with a DELETED recipient), or the claim is no longer ours:
+    // nothing is sent. 0 rows when the row is gone or someone else owns it.
+    if ((await finishFailed(row.id, claimId, 'ACCOUNT_DELETED')) > 0) result.failed++;
+    logger.warn(log, 'mail outbox: recipient deleted or claim lost before sending, message skipped');
+    return;
+  }
+
   try {
     await withDeadline(send(email, messageIdFor(row.id)), deadlineMs);
   } catch (err) {
@@ -164,6 +198,7 @@ export async function runMailWorkerOnce(opts: MailRunOptions = {}): Promise<Mail
   const maxAttempts = opts.maxAttempts ?? MAX_ATTEMPTS;
   const result: MailRunResult = { sent: 0, retried: 0, failed: 0, cancelled: 0, lostClaim: 0 };
   result.cancelled += await cancelExpired();
+  result.failed += await failDeletedRecipients();
   result.failed += await failExhaustedLeases(maxAttempts);
   for (let i = 0; i < (opts.maxMessages ?? MAX_PER_RUN); i++) {
     const claimId = randomUUID();

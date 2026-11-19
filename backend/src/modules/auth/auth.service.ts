@@ -112,6 +112,8 @@ export async function register(input: { email: string; password: string; fullNam
 export async function verifyEmail(rawToken: string): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const userId = await consumeUserToken(tx, rawToken, 'EMAIL_VERIFY');
+    // PRIV-01: like reset-password, a link never acts on an account that is not ACTIVE (the whole transaction, the token use included, rolls back).
+    if ((await tx.user.count({ where: { id: userId, status: 'ACTIVE' } })) === 0) throw new AppError(400, 'INVALID_TOKEN', 'This link is invalid or has expired');
     await tx.user.updateMany({ where: { id: userId, emailVerifiedAt: null }, data: { emailVerifiedAt: new Date() } });
   });
 }
@@ -223,6 +225,8 @@ export async function resetPassword(rawToken: string, newPassword: string): Prom
   const passwordHash = await hashPassword(newPassword);
   const userId = await prisma.$transaction(async (tx) => {
     const id = await consumeUserToken(tx, rawToken, 'PASSWORD_RESET');
+    // PRIV-01: the tokens of a deleted account are erased, but a reset must also never act on any account that is not ACTIVE.
+    if ((await tx.user.count({ where: { id, status: 'ACTIVE' } })) === 0) throw new AppError(400, 'INVALID_TOKEN', 'This link is invalid or has expired');
     // Following a link sent to the inbox also proves the address is theirs.
     await tx.user.update({ where: { id }, data: { passwordHash } });
     await tx.user.updateMany({ where: { id, emailVerifiedAt: null }, data: { emailVerifiedAt: new Date() } });
