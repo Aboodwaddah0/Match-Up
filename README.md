@@ -160,7 +160,7 @@ Verification and password-reset e-mails contain a link. Set where it points with
 
 ### Dependency audit
 
-`npm run audit:prod` (run in CI) fails on any HIGH or CRITICAL advisory in production dependencies unless it is listed with a reason and an expiry date in `backend/audit-allowlist.json`. Today the only exceptions are the Prisma CLI chain (`prisma`, `@prisma/config`, `deepmerge-ts`: not on the request path, fixed only by Prisma 7), valid until 2027-02-17.
+`npm run audit:prod` (run in CI) fails on any HIGH or CRITICAL advisory in production dependencies unless it is listed with a reason and an expiry date in `backend/audit-allowlist.json`. Today the only exceptions are the Prisma CLI chain (`prisma`, `@prisma/config`, `deepmerge-ts`, `effect`: not on the request path, fixed only by Prisma 7), valid until 2027-02-17.
 
 ## Matches API (`/api/v1/matches`, all need Bearer)
 
@@ -395,6 +395,26 @@ The table is append-only: database triggers refuse UPDATE, DELETE and TRUNCATE (
 **Known limitation.** A database superuser can still disable or drop the triggers, or the table, and the API currently connects as a superuser. Separate runtime and migration roles (Phase 3, finding OPS-08) will close this. Until then the log is protected against application code and ordinary roles, not against someone with full database privileges. Rollback of the migration drops the table and all records (see the comments in `20261117000400_admin_audit_log`).
 
 Make the first admin by hand: `UPDATE "user" SET platform_role = 'ADMIN' WHERE email = 'you@example.com';`
+
+## Error tracking (Sentry)
+
+Unexpected errors can be reported to Sentry (D20 / OBS-01). It is **off by default**: with `SENTRY_DSN` empty or unset the SDK is never initialised, nothing is patched and nothing leaves the process. The API starts and behaves identically with or without it.
+
+**Set it up (one Sentry project for the API).**
+1. In Sentry create a project, platform **Node.js** (Express is covered by it). One project for all environments.
+2. Copy its DSN: *Settings > Projects > (project) > Client Keys (DSN)*.
+3. Put it in `SENTRY_DSN` (root `.env` for Docker Compose, `backend/.env` without Docker, or the hosting provider's secret store). Never commit it. Restart the API; the start-up log says `Sentry error tracking is on` (the DSN is never logged). To switch it off again, empty `SENTRY_DSN` and restart.
+4. After adding the dependency to an existing Docker setup, rebuild the image once: `docker compose up -d --build api`.
+
+**Environment names.** `development`, `staging` or `production`. `SENTRY_ENVIRONMENT` sets it; when unset it is `production` if `NODE_ENV=production`, otherwise `development`. `NODE_ENV` keeps its three values: a staging deployment runs `NODE_ENV=production` with `SENTRY_ENVIRONMENT=staging`. Any other value stops the API at start-up.
+
+**What is reported.** Only errors the API did not expect (the 500 `INTERNAL_ERROR` branch of `middleware/error-handler.ts`, one call to `captureUnexpected`, so an error is never reported twice) and process-level crashes (uncaught exception, unhandled rejection; the last events are flushed before the process exits). Errors the API chose to return are never reported: `AppError` (even a deliberate 5xx such as 503 `MEDIA_PROVIDER_UNAVAILABLE`), validation errors, malformed requests, mapped database errors. Errors are never sampled (100%). The SDK's own Express capture is switched off because it fires before our handler and would report `ZodError` too. Each event carries the `request_id` tag so it can be matched to the log line. Failures inside background jobs are logged but not reported (a later step).
+
+**Tracing.** `tracesSampleRate: 0.1` (10% of requests), constant in `src/lib/sentry.ts`.
+
+**Privacy (nothing below ever reaches Sentry).** Passwords and hashes, access / refresh tokens and JWTs, Authorization, Cookie and Set-Cookie headers, request bodies, query strings, the Cloudinary secret and upload signatures, connection strings, other keys, e-mail addresses, user ids and IP addresses. Three layers: (1) the SDK is configured to collect no request data (`dataCollection`: no headers, cookies, bodies, query strings or user info; `includeLocalVariables: false`; the old `sendDefaultPii` option no longer exists in SDK 11); (2) `beforeSend` removes the request block (only method and path stay), the user and `extra`, redacts sensitive key names and token-, JWT-, e-mail- and connection-string-like text in messages, tags, contexts and breadcrumbs, and leaves the stack frames readable; (3) breadcrumbs drop console output and URL queries, spans drop queries, headers, bodies, client addresses and SQL text. `tests/sentry.test.ts` asserts on the envelopes the SDK would send (fake transport, no network). Kept on purpose: the stack trace with a few lines of source around each frame, the host name, OS and Node version. The text of an error message is sent after redaction, so do not put personal data in messages on purpose.
+
+**Setting list.** `SENTRY_DSN` (empty = off), `SENTRY_ENVIRONMENT` (optional).
 
 ## Tests
 

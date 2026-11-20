@@ -51,7 +51,7 @@ Last updated 2026-11-17 against commit `bea3c6c`. Evidence (experiments, plans, 
 
 **D20 (technical)**
 * C1. The app's URL scheme value, and whether an https fallback page is wanted (many e-mail clients do not make custom-scheme links clickable; Expo Go uses a different URL form than release builds).
-* C2. Sentry project / environment names and sampling rate; the rule that no e-mail, token, password or coordinates reach error reports.
+* C2. DECIDED and implemented: one Sentry project, environments development / staging / production, errors 100%, traces 10%, no e-mail, token, password, body or coordinates in reports (README "Error tracking (Sentry)").
 * C3. Expo project id and access-token handling; which notification types trigger a push; push text must be produced in the user's language (notifications are stored as data, not text).
 
 ## Gap analysis against the current code
@@ -93,7 +93,7 @@ SEC-01 owner could lift an admin venue suspension; AUTH-01 shared auth rate limi
 |---|---|---|---|---|---|
 | CONC-01 | MEDIUM | confirmed | Cancel vs accept is a lock-order deadlock (`matches.service.ts:317`); **15 of 40** races gave a spurious 409 and the match stayed OPEN | Lock the match row first in both paths; retry cancel / complete / sweepers; race test | none |
 | ERR-01 | MEDIUM | confirmed | Body over 1 MB, bad `Content-Encoding`, corrupt gzip return **500** | Map body-parser errors in `error-handler.ts` | none |
-| OBS-01 | MEDIUM | confirmed | No request id; `/health/db` logged every probe; no error tracking | Request id; ignore both health routes; **Sentry** | tool decided (D20); needs a dependency approval |
+| OBS-01 | MEDIUM | confirmed | No request id; `/health/db` logged every probe; no error tracking | Request id; ignore both health routes; **Sentry** | tool decided (D20); Sentry implemented (off until SENTRY_DSN is set) |
 | OPS-07 | MEDIUM | confirmed | `docker stop` with one live Socket.IO connection: 11 s, exit 1 | Close Socket.IO, await in-flight work, unhandled-error handlers | none |
 | OPS-08 | MEDIUM | confirmed | One **superuser** role for app and migrations; `max_connections` 100; Prisma pool 25 per instance | Separate roles; explicit `connection_limit`; pooler | none (infrastructure) |
 | OPS-01 | MEDIUM | code | Dev JWT secret passes `env.ts`; missing `SMTP_URL` only warns | Production guards | none |
@@ -131,7 +131,7 @@ DB-03 migration drift: `prisma migrate diff` is empty. Block-check scaling: refu
 | AUTH-04 | Socket handshake checks the token and ACTIVE status; the socket is dropped at token expiry and on suspension, logout-all, password change / reset (`lib/realtime.ts`); tests in `chat.test.ts` |
 | SEC-03 | Global limiter (600 / min per user, 300 / min per anonymous IP, health exempt) and per-user creation limits (see README); `tests/rate-limit-api.test.ts` |
 | PERF-01 | `GET /chats` is one aggregate query plus two batched reads (constant statements), keyset pagination (`limit`, `before`, `nextBefore`), `totalUnread` over all chats; tests in `chat.test.ts` |
-| OBS-01 (part) | `X-Request-Id` in header, log and error bodies; health probes not logged. **Sentry stays in Phase 3** (new dependency) |
+| OBS-01 (part) | `X-Request-Id` in header, log and error bodies; health probes not logged. Sentry was a Phase 3 item; it is now implemented (README "Error tracking (Sentry)"; needs a DSN) |
 
 Still open from Phase 1's scope: none. Behaviour changes to note: `GET /chats` accepts `limit` / `before` and returns `nextBefore`; error bodies gain `requestId`; a conversation whose only messages come from blocked users no longer appears in the inbox.
 
@@ -173,7 +173,7 @@ Grouped by what each group needs approved first. Effort: S = hours, M = a day or
 14. PRIV-01: deletion endpoint, four blockers, anonymization (L). Needs A1-A5; venue ownership transfer and organizer transfer only if decided (B2, A5) **(done: PRIV-01, awaiting commit; neither transfer exists)**
 
 **Phase 3: needs a new dependency or infrastructure approved**
-15. OBS-01: **Sentry** SDK (S-M, new dependency; needs C2)
+15. OBS-01: **Sentry** SDK (S-M, new dependency) - DONE in the backend (C2 decided); a Sentry account / DSN is still needed
 16. OPS-03: Redis for the rate limiter and Socket.IO adapter (M, new dependency and service)
 17. OPS-08: separate runtime and migration database roles, `connection_limit`, pooler (M, infrastructure)
 18. OPS-02: automated backups, PITR, database timeouts, restore drill (M-L, infrastructure)

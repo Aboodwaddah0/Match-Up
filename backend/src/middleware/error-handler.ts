@@ -3,6 +3,7 @@ import { ZodError } from 'zod';
 import { toAppError } from '../lib/db-errors';
 import { AppError } from '../lib/errors';
 import { logger } from '../lib/logger';
+import { captureUnexpected } from '../lib/sentry';
 
 /** The id of this request (set by the request-id middleware in app.ts), so an error report can be matched to the log lines. */
 function requestIdOf(req: Request): string | undefined {
@@ -69,5 +70,6 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
   }
 
   (req.log ?? logger).error({ err }, 'Unhandled error'); // req.log already carries the request id
+  captureUnexpected(err, requestId); // the only place an error is reported to Sentry (no-op without SENTRY_DSN)
   res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'Something went wrong', requestId } });
 }

@@ -1251,7 +1251,7 @@ Decided by the product owner after the production-readiness audit.
 - **Error tracking:** **Sentry**.
 - **Data export:** out of MVP scope (see D18).
 
-**Implementation status of D20 (partial):** configurable e-mail deep-link targets (`VERIFY_EMAIL_URL`, `RESET_PASSWORD_URL`) and Expo Push Notifications (NOTIF-01) are implemented. **Sentry error tracking is NOT implemented** (it is a Phase 3 item that needs a new dependency), and the open points (a), (b) and (c) below are still open; D20 must not be treated as complete.
+**Implementation status of D20 (partial):** configurable e-mail deep-link targets (`VERIFY_EMAIL_URL`, `RESET_PASSWORD_URL`) and Expo Push Notifications (NOTIF-01) are implemented. **Sentry error tracking is implemented in the backend** (SDK 11.11.0; off unless `SENTRY_DSN` is set; the C2 decisions below are applied: one API project, environments `development` / `staging` / `production`, all unexpected errors reported, `tracesSampleRate` 0.1, no personal data; details in README "Error tracking (Sentry)"). Still open: (a) the app URL scheme and https fallback (C1) and (c) the Expo project id and token handling (C3), so D20 must not be treated as complete. A Sentry account and DSN are still to be created by the product owner.
 
 *Implications recorded for implementation (partly built; Sentry and the open points below are not):*
 - Deep links need the mobile app's URL scheme to be defined in the Expo app configuration. Development builds in Expo Go use a different URL form than release builds.
@@ -1261,5 +1261,5 @@ Decided by the product owner after the production-readiness audit.
 
 *Open points (technical, not business rules):*
 (a) The app's URL scheme value, and whether an https fallback (for example a redirect page) is wanted, because many e-mail clients do not make custom-scheme links clickable.
-(b) The Sentry project and environment names, and the sampling rate.
+(b) DECIDED (C2): one Sentry project for the API; environments development, staging, production; errors 100%, traces 10%; no e-mail, token, password, body or coordinates in reports.
 (c) Expo project id and access-token handling, and which notification types trigger a push.

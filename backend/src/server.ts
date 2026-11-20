@@ -1,3 +1,4 @@
+import './instrument'; // must stay first: Sentry has to be set up before express / http are loaded
 import { createApp } from './app';
 import { env } from './config/env';
 import { scheduleLifecycleJobs } from './jobs/match-lifecycle';
@@ -9,6 +10,7 @@ import { storage } from './lib/cloudinary';
 import { logger } from './lib/logger';
 import { prisma } from './lib/prisma';
 import { attachRealtime, closeRealtime } from './lib/realtime';
+import { flushSentry } from './lib/sentry';
 import { gracefulShutdown } from './lib/shutdown';
 
 const app = createApp();
@@ -52,6 +54,7 @@ async function shutdown(reason: string, failing = false): Promise<void> {
     timeoutMs: env.SHUTDOWN_TIMEOUT_MS,
     log: { info: (m) => logger.info(m), warn: (m) => logger.warn(m) },
   });
+  await flushSentry(); // send the last queued error reports before the process ends
   process.exit(failing ? 1 : result);
 }
 

@@ -33,6 +33,10 @@ const schema = z.object({
     .optional()
     .transform((v) => (v ? v : undefined))
     .refine((v) => v === undefined || isValidMailKey(v), 'must be 32 random bytes encoded as base64 (43 characters), e.g. from: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"'),
+  // Error tracking (D20 / OBS-01). Empty or unset = Sentry stays completely off. SENTRY_ENVIRONMENT picks the environment name shown in Sentry;
+  // unset = production when NODE_ENV=production, otherwise development. A staging deployment runs NODE_ENV=production with SENTRY_ENVIRONMENT=staging.
+  SENTRY_DSN: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  SENTRY_ENVIRONMENT: z.string().trim().optional().transform((v) => (v ? v : undefined)).pipe(z.enum(['development', 'staging', 'production']).optional()),
   // Push notifications through Expo (NOTIF-01). The access token is needed only when "Enhanced Push Security" is switched on in the Expo
   // account; the API cannot detect that, so EXPO_ENHANCED_SECURITY says so (production then refuses to start without the token).
   // The Expo project id is NOT a backend setting: the mobile app passes it to getExpoPushTokenAsync (see README).
