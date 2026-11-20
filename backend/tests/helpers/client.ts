@@ -36,6 +36,8 @@ export async function resetDb(): Promise<void> {
     // push coordination rows hold no foreign keys, so TRUNCATE does not reach them: put them back to their initial state
     prisma.$executeRawUnsafe("UPDATE push_provider_state SET status = 'OK', paused_until = NULL, consecutive_failures = 0, last_error_code = NULL, last_error_at = NULL, probe_claim_id = NULL, probe_until = NULL"),
     prisma.$executeRawUnsafe('UPDATE push_rate_bucket SET tokens = 300, refilled_at = now(), blocked_until = NULL'),
+    // media reconciliation progress holds no foreign keys either (the job creates its rows itself)
+    prisma.$executeRawUnsafe('DELETE FROM media_reconcile'),
   ]);
 }
 

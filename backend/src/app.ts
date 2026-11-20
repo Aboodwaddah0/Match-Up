@@ -14,6 +14,7 @@ import { chatRouter } from './modules/chat/chat.routes';
 import { citiesRouter } from './modules/cities/cities.routes';
 import { healthRouter } from './modules/health/health.routes';
 import { matchesRouter } from './modules/matches/matches.routes';
+import { mediaRouter, playerMediaRouter, teamMediaRouter } from './modules/media/media.routes';
 import { notificationsRouter } from './modules/notifications/notifications.routes';
 import { matchReviewsRouter, playerReviewsRouter } from './modules/reviews/reviews.routes';
 import { adminReportsRouter, blocksRouter as userBlocksRouter, reportsRouter } from './modules/safety/safety.routes';
@@ -57,6 +58,9 @@ export function createApp() {
   app.use('/api/v1/reports', reportsRouter);
   app.use('/api/v1/admin/reports', adminReportsRouter);
   app.use('/api/v1/admin', adminRouter);
+  app.use('/api/v1/media', mediaRouter);
+  app.use('/api/v1/players/:userId/media', playerMediaRouter);
+  app.use('/api/v1/teams/:teamId/media', teamMediaRouter);
   app.use('/api/v1/players', playersRouter);
   app.use('/api/v1/cities', citiesRouter);
   app.use('/api/v1/matches/:matchId/reviews', matchReviewsRouter);

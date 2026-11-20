@@ -28,7 +28,7 @@ export const listAuditLogSchema = paging
   .extend({
     actorId: z.uuid().optional(),
     action: z.enum(AUDIT_ACTIONS).optional(),
-    targetType: z.enum(['USER', 'VENUE', 'REPORT', 'MATCH']).optional(),
+    targetType: z.enum(['USER', 'VENUE', 'REPORT', 'MATCH', 'MEDIA']).optional(),
     targetId: z.uuid().optional(),
     from: instant.optional(),
     to: instant.optional(),

@@ -102,7 +102,15 @@ describe('start-up configuration (a real process loads src/config/env.ts)', () =
     });
     return { code: r.status, out: r.stdout, err: r.stderr };
   }
-  const production = { NODE_ENV: 'production', APP_URL: 'https://api.example.com', SMTP_URL: 'smtps://u:p@smtp.example.com:465' };
+  const production = {
+    NODE_ENV: 'production',
+    APP_URL: 'https://api.example.com',
+    SMTP_URL: 'smtps://u:p@smtp.example.com:465',
+    // media storage is a required production setting too (not what these mail-key tests are about)
+    CLOUDINARY_CLOUD_NAME: 'acme-media',
+    CLOUDINARY_API_KEY: '123456789012345',
+    CLOUDINARY_API_SECRET: 'Zq8Xv2LmN5rT9vC4dHsJaE6gKoI',
+  };
 
   it('production refuses to start without the key', () => {
     const r = load(production);

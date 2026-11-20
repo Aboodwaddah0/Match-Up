@@ -12,6 +12,10 @@ const good: ProductionSettings = {
   APP_URL: 'https://api.example.com',
   SMTP_URL: 'smtps://user:pass@smtp.example.com:465',
   MAIL_OUTBOX_ENCRYPTION_KEY: 'u8Qf3kZ0w1X7pYb2LmN5rT9vC4dHsJaE6gKoIqWxPzM',
+  // media storage is a required production setting too (not what these push tests are about, but a sound configuration needs it)
+  CLOUDINARY_CLOUD_NAME: 'acme-media',
+  CLOUDINARY_API_KEY: '123456789012345',
+  CLOUDINARY_API_SECRET: 'Zq8Xv2LmN5rT9vC4dHsJaE6gKoI',
 };
 
 describe('push configuration guards (production)', () => {
@@ -50,6 +54,9 @@ describe('push configuration at start-up (a real process loads src/config/env.ts
     APP_URL: 'https://api.example.com',
     SMTP_URL: 'smtps://u:p@smtp.example.com:465',
     MAIL_OUTBOX_ENCRYPTION_KEY: 'u8Qf3kZ0w1X7pYb2LmN5rT9vC4dHsJaE6gKoIqWxPzM',
+    CLOUDINARY_CLOUD_NAME: 'acme-media',
+    CLOUDINARY_API_KEY: '123456789012345',
+    CLOUDINARY_API_SECRET: 'Zq8Xv2LmN5rT9vC4dHsJaE6gKoI',
   };
 
   function load(vars: Record<string, string>) {

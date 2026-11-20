@@ -17,6 +17,11 @@ export interface ProductionSettings {
   EXPO_API_BASE_URL?: string | undefined;
   VERIFY_EMAIL_URL?: string | undefined;
   RESET_PASSWORD_URL?: string | undefined;
+  CLOUDINARY_CLOUD_NAME?: string | undefined;
+  CLOUDINARY_API_KEY?: string | undefined;
+  CLOUDINARY_API_SECRET?: string | undefined;
+  CLOUDINARY_API_BASE_URL?: string | undefined;
+  CLOUDINARY_DELIVERY_BASE_URL?: string | undefined;
 }
 
 /** Fragments of the placeholder secrets and passwords shipped in .env.example, docker-compose.yml, tests and CI. */
@@ -53,6 +58,18 @@ export function productionProblems(s: ProductionSettings): string[] {
   }
   if (s.EXPO_API_BASE_URL && !/^https:\/\//i.test(s.EXPO_API_BASE_URL)) {
     problems.push('EXPO_API_BASE_URL must be an https URL in production (the access token travels in the request).');
+  }
+  // Media storage. Without it nobody could upload, and files of deleted accounts could never be removed from the provider.
+  if (!s.CLOUDINARY_CLOUD_NAME || !s.CLOUDINARY_API_KEY || !s.CLOUDINARY_API_SECRET) {
+    problems.push('CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET must all be set: photo and video uploads need them, and the files of deleted media and accounts could not be removed from storage.');
+  } else if (KNOWN_PLACEHOLDERS.some((x) => `${s.CLOUDINARY_API_KEY} ${s.CLOUDINARY_API_SECRET}`.toLowerCase().includes(x))) {
+    problems.push('CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET look like development placeholders. Use the credentials of the Cloudinary product environment.');
+  }
+  if (s.CLOUDINARY_API_BASE_URL && !/^https:\/\//i.test(s.CLOUDINARY_API_BASE_URL)) {
+    problems.push('CLOUDINARY_API_BASE_URL must be an https URL in production (the API secret is sent to it).');
+  }
+  if (s.CLOUDINARY_DELIVERY_BASE_URL && !/^https:\/\//i.test(s.CLOUDINARY_DELIVERY_BASE_URL)) {
+    problems.push('CLOUDINARY_DELIVERY_BASE_URL must be an https URL in production (media URLs are stored and served as https only).');
   }
   const linksConfigured = Boolean(s.VERIFY_EMAIL_URL && s.RESET_PASSWORD_URL);
   if (!linksConfigured && isLocal(s.APP_URL)) {

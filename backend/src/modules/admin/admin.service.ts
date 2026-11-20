@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { reconcileStatus } from '../../jobs/media-reconcile';
 import { recordAdminAudit } from '../../lib/audit';
 import { lockVenue } from '../../lib/locks';
 import { AppError } from '../../lib/errors';
@@ -146,7 +147,7 @@ export async function listAuditLog(q: z.infer<typeof listAuditLogSchema>) {
 /** Platform counters for the admin dashboard. */
 export async function getStats() {
   const day = new Date(Date.now() - 86_400_000);
-  const [users, newUsers24h, matchesUpcoming, matchesCreated24h, activeVenues, pendingBookings, openReports] = await Promise.all([
+  const [users, newUsers24h, matchesUpcoming, matchesCreated24h, activeVenues, pendingBookings, openReports, mediaDeletionStuck] = await Promise.all([
     prisma.user.count({ where: { status: 'ACTIVE' } }),
     prisma.user.count({ where: { createdAt: { gt: day } } }),
     prisma.match.count({ where: { status: { in: ['OPEN', 'FULL', 'SCHEDULED'] } } }),
@@ -154,6 +155,10 @@ export async function getStats() {
     prisma.venue.count({ where: { status: 'ACTIVE' } }),
     prisma.booking.count({ where: { status: 'PENDING' } }),
     prisma.report.count({ where: { status: { in: ['OPEN', 'IN_REVIEW'] } } }),
+    // Media files that still have not been deleted at the provider a day after they were hidden: the retry loop is failing (see jobs/media-worker.ts).
+    prisma.mediaItem.count({ where: { status: 'DELETING', deletingSince: { lt: day } } }),
   ]);
-  return { users, newUsers24h, matchesUpcoming, matchesCreated24h, activeVenues, pendingBookings, openReports };
+  // Daily reconciliation of the media folder at the provider: the age of the oldest unprocessed work and any type that keeps failing (jobs/media-reconcile.ts).
+  const mediaReconcile = await reconcileStatus();
+  return { users, newUsers24h, matchesUpcoming, matchesCreated24h, activeVenues, pendingBookings, openReports, mediaDeletionStuck, mediaReconcile };
 }

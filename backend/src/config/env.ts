@@ -46,6 +46,36 @@ const schema = z.object({
     .transform((v) => v.replace(/\/+$/, '')),
   // Sends the pushes of notifications. Safe to run on several instances.
   PUSH_WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  // Media (photos and videos) are stored at Cloudinary; the API signs direct uploads and verifies / deletes files, it never receives the binary.
+  // All three are REQUIRED in production (see production-checks.ts); unset elsewhere = the media endpoints answer 503 MEDIA_NOT_CONFIGURED.
+  CLOUDINARY_CLOUD_NAME: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  CLOUDINARY_API_KEY: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  CLOUDINARY_API_SECRET: z.string().trim().optional().transform((v) => (v ? v : undefined)),
+  // Only a different value in tests or behind a proxy. The API secret travels to this host, so production requires https.
+  CLOUDINARY_API_BASE_URL: z
+    .string()
+    .trim()
+    .url()
+    .default('https://api.cloudinary.com')
+    .transform((v) => v.replace(/\/+$/, '')),
+  CLOUDINARY_DELIVERY_BASE_URL: z
+    .string()
+    .trim()
+    .url()
+    .default('https://res.cloudinary.com')
+    .transform((v) => v.replace(/\/+$/, '')),
+  // Folder prefix of every storage key ("<folder>/media/<id>"), so one Cloudinary account can serve several environments.
+  CLOUDINARY_FOLDER: z.string().trim().regex(/^[A-Za-z0-9_-]{1,40}$/, 'letters, digits, - and _ only').default('fym'),
+  // Deletes files at the provider after a media row was removed or an upload was never confirmed. Safe to run on several instances.
+  MEDIA_WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  // Daily reconciliation of the media folder at the provider: removes files that are not the verified file of a READY item (jobs/media-reconcile.ts).
+  MEDIA_RECONCILE_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
+  // Hours between the START of two scan cycles of one resource type (a cycle that takes longer is followed by the next one at once).
+  MEDIA_RECONCILE_INTERVAL_HOURS: z.coerce.number().int().min(1).max(168).default(24),
+  // A stray is deleted only when the PROVIDER created it at least this long ago; must exceed the upload window (70 min) by a wide margin.
+  MEDIA_RECONCILE_GRACE_HOURS: z.coerce.number().int().min(2).max(168).default(24),
+  // Admin API listing pages one run may fetch (all resource types together, 500 assets per page). The provider allows 500 Admin API calls per hour.
+  MEDIA_RECONCILE_MAX_PAGES: z.coerce.number().int().min(1).max(100).default(25),
   MAIL_FROM: z.string().trim().min(3).default('Find Your Match <no-reply@localhost>'),
   // Sends queued e-mails (verification, password reset). Safe to run on several instances. Turn it off only on instances that must not send.
   MAIL_WORKER_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),

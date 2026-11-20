@@ -49,6 +49,10 @@ const FYM: Record<string, [status: number, code: string, message: string]> = {
   FYM_REVIEWED_NOT_ATTENDEE: [400, 'REVIEWED_NOT_ATTENDEE', 'That player did not attend this match'],
   FYM_REVIEW_WINDOW_CLOSED: [409, 'REVIEW_WINDOW_CLOSED', 'The review window has closed'],
   FYM_MATCH_NOT_COMPLETED: [409, 'MATCH_NOT_COMPLETED', 'Reviews open after the match is completed'],
+  FYM_MEDIA_LIMIT: [409, 'MEDIA_LIMIT_REACHED', 'The limit of photos and videos has been reached; delete one first'],
+  FYM_MEDIA_BAD_TRANSITION: [409, 'INVALID_STATE', 'This action is not allowed for this media in its current state'],
+  FYM_MEDIA_IMMUTABLE: [409, 'MEDIA_IMMUTABLE', 'Only the caption and the order of a media item can be changed'],
+  FYM_MEDIA_NOT_DELETING: [409, 'MEDIA_NOT_DELETING', 'A media row can only be removed after its file was deleted from storage'],
 };
 
 function textOf(err: unknown): string {

@@ -329,6 +329,7 @@ enum AdminAuditAction {
   BOOKING_REJECTED_BY_ADMIN
   BOOKING_CANCELLED_BY_ADMIN
   ACCOUNT_DELETED
+  MEDIA_REMOVED_BY_ADMIN
 
   @@map("admin_audit_action")
 }
@@ -338,6 +339,7 @@ enum AdminAuditTarget {
   VENUE
   REPORT
   MATCH
+  MEDIA
 
   @@map("admin_audit_target")
 }
@@ -348,8 +350,33 @@ enum ReportTarget {
   VENUE
   TEAM
   MESSAGE
+  MEDIA
 
   @@map("report_target")
+}
+
+enum MediaKind {
+  PHOTO
+  VIDEO
+
+  @@map("media_kind")
+}
+
+// PENDING = an upload slot was issued and the file is not verified yet; READY = verified and visible; DELETING = hidden, waiting for the
+// storage object to be removed (the row is deleted only after that). See the media migration and jobs/media-worker.ts.
+enum MediaStatus {
+  PENDING
+  READY
+  DELETING
+
+  @@map("media_status")
+}
+
+enum StorageProvider {
+  CLOUDINARY
+  S3
+
+  @@map("storage_provider")
 }
 
 enum ReportStatus {
@@ -448,6 +475,9 @@ model User {
 
   conversations ConversationParticipant[]
   messages      Message[]
+
+  mediaOwned    MediaItem[] @relation("MediaOwner")
+  mediaUploaded MediaItem[] @relation("MediaUploader")
 
   @@map("user")
 }
@@ -919,6 +949,7 @@ model Team {
   challengesOut TeamChallenge[]  @relation("ChallengerTeam")
   challengesIn  TeamChallenge[]  @relation("ChallengedTeam")
   conversation  Conversation?
+  media         MediaItem[]
 
   @@index([cityId])
   @@map("team")
@@ -1211,4 +1242,76 @@ model Message {
 
   @@index([conversationId, createdAt])
   @@map("message")
+}
+
+// ───────── Media (photos and videos of players and teams) ─────────
+// One table for both owners: exactly one of owner_user_id / team_id is set (CHECK). The binary file lives at the storage provider; this row holds
+// the reference (provider + storage_key) and the VERIFIED metadata. Rows are never cascaded away: deleting a row would lose the storage_key and
+// leave the file behind, so a row is deleted only by the media worker after the provider confirmed the object is gone (trigger-enforced).
+model MediaItem {
+  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerUserId        String?         @map("owner_user_id") @db.Uuid
+  teamId             String?         @map("team_id") @db.Uuid
+  uploadedById       String          @map("uploaded_by_id") @db.Uuid
+  kind               MediaKind
+  status             MediaStatus     @default(PENDING)
+  provider           StorageProvider @default(CLOUDINARY)
+  storageKey         String          @map("storage_key")
+  url                String?
+  thumbnailUrl       String?         @map("thumbnail_url")
+  mimeType           String          @map("mime_type")
+  sizeBytes          BigInt?         @map("size_bytes")
+  width              Int?
+  height             Int?
+  durationMs         Int?            @map("duration_ms")
+  caption            String?
+  sortOrder          Int             @default(0) @map("sort_order")
+  createdAt          DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  confirmedAt        DateTime?       @map("confirmed_at") @db.Timestamptz(6)
+  updatedAt          DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  // deletion bookkeeping (status DELETING only)
+  deletingSince      DateTime?       @map("deleting_since") @db.Timestamptz(6)
+  deletionAttempts   Int             @default(0) @map("deletion_attempts")
+  nextDeletionAt     DateTime?       @map("next_deletion_at") @db.Timestamptz(6)
+  deletionClaimId    String?         @map("deletion_claim_id") @db.Uuid
+  deletionLeaseUntil DateTime?       @map("deletion_lease_until") @db.Timestamptz(6)
+  lastDeletionError  String?         @map("last_deletion_error")
+  // stray-object cleanup after a successful confirmation (status READY only): 3 = the first sweep is due now, 2 = the second is due when the upload
+  // window has closed, 1 = the last one is due a day after the slot was created, 0 = done. See migration 20261125000100_media_stray_sweep and
+  // jobs/media-worker.ts.
+  straySweepsLeft    Int             @default(0) @map("stray_sweeps_left") @db.SmallInt
+  straySweepAt       DateTime?       @map("stray_sweep_at") @db.Timestamptz(6)
+  straySweepAttempts Int             @default(0) @map("stray_sweep_attempts")
+  lastStrayError     String?         @map("last_stray_error")
+
+  owner      User? @relation("MediaOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  team       Team? @relation(fields: [teamId], references: [id], onDelete: Restrict)
+  uploadedBy User  @relation("MediaUploader", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  // Partial indexes (READY listings, the owner caps, the deletion queue, the stale-PENDING scan) are hand-written in the migration.
+  @@unique([provider, storageKey])
+  @@index([uploadedById])
+  @@map("media_item")
+}
+
+// Progress of the daily reconciliation of the media folder at the storage provider (one row per resource type: image / video / raw, each with its own
+// pagination state). See migration 20261126000100_media_reconcile and jobs/media-reconcile.ts. Rows are created by the job itself.
+model MediaReconcile {
+  resourceType         String    @id @map("resource_type")
+  // the cursor that fetches the NEXT page of the listing; null while the cycle has not fetched a page yet
+  cursor               String?
+  // null = idle (no cycle in progress); otherwise when the running cycle began (= the age of the oldest work that is still unprocessed)
+  cycleStartedAt       DateTime? @map("cycle_started_at") @db.Timestamptz(6)
+  cyclePages           Int       @default(0) @map("cycle_pages")
+  cycleScanned         Int       @default(0) @map("cycle_scanned")
+  cycleDeleted         Int       @default(0) @map("cycle_deleted")
+  lastCycleCompletedAt DateTime? @map("last_cycle_completed_at") @db.Timestamptz(6)
+  nextRunAt            DateTime  @default(now()) @map("next_run_at") @db.Timestamptz(6)
+  claimId              String?   @map("claim_id") @db.Uuid
+  leaseUntil           DateTime? @map("lease_until") @db.Timestamptz(6)
+  attempts             Int       @default(0)
+  lastError            String?   @map("last_error")
+  updatedAt            DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("media_reconcile")
 }

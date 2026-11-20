@@ -120,3 +120,5 @@ export const challengeLimiter = perUser(20, 60);
 export const directChatLimiter = perUser(30, 60);
 export const messageLimiter = perUser(60, 1);
 export const deviceLimiter = perUser(20, 60);
+// every upload slot is a row, a signature and later a stored file: 30 per hour is far above normal use (the per-owner cap is 30 / 50 items in total)
+export const mediaUploadLimiter = perUser(30, 60);

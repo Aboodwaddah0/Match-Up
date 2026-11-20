@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { authenticate, requireAdmin } from '../../middleware/authenticate';
 import { validate } from '../../middleware/validate';
+import * as mediaAdmin from '../media/media.controller';
 import * as admin from './admin.controller';
 import { idParams, listAuditLogSchema, listUsersSchema, listVenuesSchema, reasonSchema } from './admin.schemas';
 
@@ -18,6 +19,9 @@ adminRouter.post('/users/:id/reactivate', validate({ params: idParams }), admin.
 adminRouter.get('/venues', validate({ query: listVenuesSchema }), admin.listVenues);
 adminRouter.post('/venues/:id/suspend', validate({ params: idParams, body: reasonSchema, optionalBody: true }), admin.suspendVenue);
 adminRouter.post('/venues/:id/reactivate', validate({ params: idParams, body: reasonSchema, optionalBody: true }), admin.reactivateVenue);
+
+// media: remove any photo or video (audited; the file is deleted at the provider by the media worker)
+adminRouter.post('/media/:id/remove', validate({ params: idParams, body: reasonSchema, optionalBody: true }), mediaAdmin.adminRemove);
 
 adminRouter.get('/stats', admin.stats);
 

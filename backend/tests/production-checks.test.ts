@@ -8,6 +8,9 @@ const good: ProductionSettings = {
   APP_URL: 'https://api.example.com',
   SMTP_URL: 'smtps://user:pass@smtp.example.com:465',
   MAIL_OUTBOX_ENCRYPTION_KEY: 'u8Qf3kZ0w1X7pYb2LmN5rT9vC4dHsJaE6gKoIqWxPzM',
+  CLOUDINARY_CLOUD_NAME: 'acme-media',
+  CLOUDINARY_API_KEY: '123456789012345',
+  CLOUDINARY_API_SECRET: 'Zq8Xv2LmN5rT9vC4dHsJaE6gKoI',
 };
 
 describe('production configuration guards (OPS-01)', () => {
@@ -53,7 +56,7 @@ describe('production configuration guards (OPS-01)', () => {
 
   it('reports every problem at once', () => {
     const problems = productionProblems({ NODE_ENV: 'production', JWT_ACCESS_SECRET: 'dev-only-secret-change-me-dev-only-secret-change-me', DATABASE_URL: 'postgresql://fym:fym_dev_password@db/fym', APP_URL: 'http://localhost:3000' });
-    expect(problems).toHaveLength(5); // the mail key is missing too
+    expect(problems).toHaveLength(6); // the mail key and the Cloudinary credentials are missing too
   });
 
   describe('the dedicated mail encryption key', () => {
@@ -90,5 +93,37 @@ describe('production configuration guards (OPS-01)', () => {
       expect(productionProblems({ ...noKey, NODE_ENV: 'development' })).toEqual([]);
       expect(productionProblems({ ...noKey, NODE_ENV: 'test' })).toEqual([]);
     });
+  });
+});
+
+describe('media storage (Cloudinary) guards', () => {
+  const noCloud: ProductionSettings = { ...good, CLOUDINARY_CLOUD_NAME: undefined, CLOUDINARY_API_KEY: undefined, CLOUDINARY_API_SECRET: undefined };
+
+  it('refuses to start in production without the three credentials, because uploads and the deletion of files depend on them', () => {
+    const problems = productionProblems(noCloud);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET/);
+  });
+
+  it.each(['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'] as const)('a missing %s alone is enough to refuse', (name) => {
+    const problems = productionProblems({ ...good, [name]: undefined });
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/must all be set/);
+  });
+
+  it('refuses development placeholders as credentials', () => {
+    expect(productionProblems({ ...good, CLOUDINARY_API_SECRET: 'change-me-change-me' })[0]).toMatch(/placeholders/);
+    expect(productionProblems({ ...good, CLOUDINARY_API_KEY: 'test-only-key' })[0]).toMatch(/placeholders/);
+  });
+
+  it('the API secret and the stored URLs must travel over https', () => {
+    expect(productionProblems({ ...good, CLOUDINARY_API_BASE_URL: 'http://api.cloudinary.com' })[0]).toMatch(/CLOUDINARY_API_BASE_URL must be an https URL/);
+    expect(productionProblems({ ...good, CLOUDINARY_DELIVERY_BASE_URL: 'http://res.cloudinary.com' })[0]).toMatch(/CLOUDINARY_DELIVERY_BASE_URL must be an https URL/);
+    expect(productionProblems({ ...good, CLOUDINARY_API_BASE_URL: 'https://api.cloudinary.com', CLOUDINARY_DELIVERY_BASE_URL: 'https://res.cloudinary.com' })).toEqual([]);
+  });
+
+  it('is not required outside production, so development and tests run without it', () => {
+    expect(productionProblems({ ...noCloud, NODE_ENV: 'development' })).toEqual([]);
+    expect(productionProblems({ ...noCloud, NODE_ENV: 'test' })).toEqual([]);
   });
 });

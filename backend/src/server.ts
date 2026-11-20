@@ -2,7 +2,10 @@ import { createApp } from './app';
 import { env } from './config/env';
 import { scheduleLifecycleJobs } from './jobs/match-lifecycle';
 import { scheduleMailWorker } from './jobs/mail-worker';
+import { scheduleMediaReconcile } from './jobs/media-reconcile';
+import { scheduleMediaWorker } from './jobs/media-worker';
 import { schedulePushWorker } from './jobs/push-worker';
+import { storage } from './lib/cloudinary';
 import { logger } from './lib/logger';
 import { prisma } from './lib/prisma';
 import { attachRealtime, closeRealtime } from './lib/realtime';
@@ -24,9 +27,14 @@ if (env.NODE_ENV === 'production' && env.TRUST_PROXY === 0) {
 const stopLifecycle = env.JOBS_ENABLED && env.NODE_ENV !== 'test' ? scheduleLifecycleJobs() : async () => {};
 const stopMail = env.MAIL_WORKER_ENABLED && env.NODE_ENV !== 'test' ? scheduleMailWorker() : async () => {};
 const stopPush = env.PUSH_WORKER_ENABLED && env.NODE_ENV !== 'test' ? schedulePushWorker() : async () => {};
+if (env.MEDIA_WORKER_ENABLED && env.NODE_ENV !== 'test' && !storage.configured()) {
+  logger.warn('Cloudinary is not configured: the media worker is not started, so files of deleted media cannot be removed from storage');
+}
+const stopMedia = env.MEDIA_WORKER_ENABLED && env.NODE_ENV !== 'test' && storage.configured() ? scheduleMediaWorker() : async () => {};
+const stopReconcile = env.MEDIA_RECONCILE_ENABLED && env.NODE_ENV !== 'test' && storage.configured() ? scheduleMediaReconcile() : async () => {};
 // A send in progress is awaited; if it outlives the shutdown timeout its claim lease expires and the message is retried (see mail-worker.ts).
 const stopJobs = async () => {
-  await Promise.all([stopLifecycle(), stopMail(), stopPush()]);
+  await Promise.all([stopLifecycle(), stopMail(), stopPush(), stopMedia(), stopReconcile()]);
 };
 
 let shuttingDown = false;

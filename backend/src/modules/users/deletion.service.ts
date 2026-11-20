@@ -8,6 +8,7 @@ import { prisma } from '../../lib/prisma';
 import { disconnectUser } from '../../lib/realtime';
 import type { Actor } from '../../types/actor';
 import { releaseBookingForMatch } from '../bookings/bookings.service';
+import { markPlayerMediaForDeletion } from '../media/media.service';
 import { cancelPendingChallengeInTx } from '../teams/challenges.service';
 
 /*
@@ -261,6 +262,9 @@ async function deleteInTransaction(tx: Prisma.TransactionClient, userId: string,
   await tx.blockedUser.deleteMany({ where: { OR: [{ blockerId: userId }, { blockedId: userId }] } });
   await tx.favorite.deleteMany({ where: { userId } });
   await tx.playerProfile.deleteMany({ where: { userId } }); // positions cascade from the profile
+  // The player's own photos and videos are hidden at once (DELETING, no URL); the media worker deletes the files at the provider and the rows only
+  // afterwards. Team media is NOT touched: it belongs to the team and stays, its uploader shows as "Deleted user".
+  await markPlayerMediaForDeletion(tx, userId);
 
   // Anonymize in place. The placeholder comes from the immutable primary key, so it is unique, and the reserved ".invalid" domain never resolves.
   // This UPDATE changes a unique key column (email), so Postgres takes a FOR UPDATE lock on the user row for it: it waits for transactions that

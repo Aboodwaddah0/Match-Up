@@ -3,6 +3,7 @@ import { recordAdminAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
 import { prisma } from '../../lib/prisma';
 import { canSeeMessage } from '../chat/chat.service';
+import { canSeeMedia } from '../media/media.service';
 import { notify } from '../notifications/notify';
 import type { adminListReportsSchema, createReportSchema } from './safety.schemas';
 
@@ -59,6 +60,7 @@ async function targetExists(type: z.infer<typeof createReportSchema>['targetType
     case 'VENUE': return !!(await prisma.venue.findUnique(where));
     case 'TEAM': return !!(await prisma.team.findUnique(where));
     case 'MESSAGE': return canSeeMessage(reporterId, id); // you can only report messages you can see
+    case 'MEDIA': return canSeeMedia(reporterId, id); // only a READY photo / video the reporter can see (never a pending or removed one)
   }
 }
 
